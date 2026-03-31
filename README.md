@@ -81,7 +81,6 @@ schwab-options-greeks-analyzer/
 ## Author
 
 **Reid Riddle**
-Finance Student | CFA Candidate | Aspiring Trading Desk & Financial Data Analyst
 
 - GitHub: [@rreidriddle](https://github.com/rreidriddle)
 - LinkedIn: (https://www.linkedin.com/in/rreidriddle/)
