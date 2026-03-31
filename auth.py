@@ -171,9 +171,11 @@ def _run_login_flow() -> str:
     redirected_url = input("  Paste the full redirect URL here and press Enter:\n  > ").strip()
 
     try:
-        code_part = redirected_url.split("code=")[1]
-        auth_code = code_part.split("&")[0]
-    except IndexError:
+        from urllib.parse import urlparse, parse_qs, unquote
+        parsed    = urlparse(redirected_url)
+        params    = parse_qs(parsed.query)
+        auth_code = unquote(params["code"][0])
+    except (IndexError, KeyError):
         raise ValueError(
             "❌  Could not extract authorization code from URL.\n"
             "    Make sure you pasted the complete redirect URL."
