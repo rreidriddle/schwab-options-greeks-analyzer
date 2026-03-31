@@ -11,12 +11,6 @@ GammaEX, VannaEX, and CharmEX for market maker hedging flows.
 
 ---
 
-## Background & Motivation
-
-Understanding these flows allows us to anticipate structural price flows
-that aren't driven by fundamental news. This tool shows the result of dealer
-risk management. I built this because UnusualWhales has 2 day delays for these datapoints.
-
 ## What It Does
 
 - Auth.py walks you through Charles Schwab's authentication process
@@ -66,7 +60,7 @@ schwab-options-greeks-analyzer/
 ├── .env                         # API credentials (not tracked by Git)
 ├── .gitignore                   # Protects credentials and cache files
 └── README.md                    # This file
-
+```
 ## Sample Output — Console Summary
 
 ```
@@ -82,7 +76,7 @@ schwab-options-greeks-analyzer/
     $  639.0  -████████████████████  GEX=-19.3M  VannEX=-510.34M
     $  632.7  -███████████████████   GEX=-19.3M  VannEX=-21.24M
     $  635.9  -███████████████████   GEX=-18.4M  VannEX=-232.10M
-
+```
 
 ## Author
 
