@@ -35,21 +35,19 @@ GammaEX, VannaEX, and CharmEX for market maker hedging flows.
 
 ### Why This Matters for Markets
 
-When dealers are in a negative gamma regime (GEX < 0), their hedging
-amplifies every move — small sell-offs become waterfalls, small rallies get
-squeezed. This is the environment that produces the violent, headline-driven
-swings seen during macro uncertainty.
+When dealers are in a negative gamma regime (GEX < 0), they're hedging
+with the market. This causes dealers to amplify the current trend. GEX exposes
+the strikes that dealers are positioned the heaviest. These levels can act as
+strong support or resistance.
 
-Vanna is particularly powerful around macro events. When VIX spikes and
-traders pile into puts, dealers accumulate large short hedges. When volatility
-mean-reverts — even without a fundamental catalyst — dealers mechanically unwind
-those hedges, creating the "low-volume melt-up" pattern experienced traders
-recognize immediately.
+Vanna Exposure charts the sensitivity of dealer delta hedges to changes in implied
+volatility. When IV moves dealers are forced to buy or sell the underlying to hedge.
+The direction and magnitude of those flows can be found in the vanna profile before
+the move ever happens.
 
-Charm creates predictable end-of-day flows. As options approach expiration,
-delta bleeds away from puts and calls, forcing dealers to re-hedge even if price
-hasn't moved — producing the gravitational pull toward key strikes seen on
-expiration Fridays.
+Charm represents delta decay, as dealers delta decays from options they have sold
+they must buy or sell shares to hedge. Charm gives us an idea of those guaranteed
+flows as expirations get closer. 
 
 ## Project Structure
 
@@ -64,18 +62,36 @@ schwab-options-greeks-analyzer/
 ## Sample Output — Console Summary
 
 ```
-════════════════════════════════════════════════════════════
-  SPY  |  Spot: $632.14  |  Total OI: 2,309,964
-════════════════════════════════════════════════════════════
-  Net GEX    : $-0.233B  →  NEGATIVE (amplifying)
-  Net VannEX : $-579.08M  →  BULLISH unwind risk
-  Net CharmEX: +0.0189M  →  BEARISH delta bleed
-  Net VommEX : $-1078.76M
+SPY...
+  $652.24
 
-  Top 5 strikes by |GEX|:
-    $  639.0  -████████████████████  GEX=-19.3M  VannEX=-510.34M
-    $  632.7  -███████████████████   GEX=-19.3M  VannEX=-21.24M
-    $  635.9  -███████████████████   GEX=-18.4M  VannEX=-232.10M
+══════════════════════════════════════════════════════════
+  SPY  |  Spot $652.24  |  OI 5,744,260
+══════════════════════════════════════════════════════════
+  Net GEX     $-0.954B  NEGATIVE
+  Net VannEX  $+262.6M
+  Net CharmEX -4404.4K
+
+QQQ...
+  $580.19
+
+══════════════════════════════════════════════════════════
+  QQQ  |  Spot $580.19  |  OI 2,690,690
+══════════════════════════════════════════════════════════
+  Net GEX     $-0.096B  NEGATIVE
+  Net VannEX  $+92.4M
+  Net CharmEX -1508.6K
+
+DIA...
+  $463.76
+
+══════════════════════════════════════════════════════════
+  DIA  |  Spot $463.76  |  OI 86,449
+══════════════════════════════════════════════════════════
+  Net GEX     $+0.001B  POSITIVE
+  Net VannEX  $+4.1M
+  Net CharmEX -60.4K
+
 ```
 
 ## Author
