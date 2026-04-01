@@ -1,5 +1,3 @@
-new readme
-
 # Schwab Options Greek Analyzer
 
 A Python tool that uses Schwab API data to fetch live options chain data
