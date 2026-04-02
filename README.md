@@ -1,4 +1,4 @@
-# Schwab Options Greek Analyzer
+# Black-Scholes Greeks Dashboard
 
 A Python tool that uses Schwab API data to fetch live options chain data
 and compute second-order greeks for SPY, QQQ, and DIA. It visualizes current
