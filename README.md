@@ -18,9 +18,9 @@ GammaEX, VannaEX, and CharmEX for market maker hedging flows.
     - Gamma, Vanna, Charm (second-order)
 - Measures both call and put greeks with a net toggle option
 - Aggregates net dealer exposure by strike across all expirations, scaled by
-    by open interest and the options multiplier
+    open interest and the options multiplier
 - Renders a multi-panel dashboard showing GammaEX, VannaEX, and CharmEX
-    for all three ETFs. 
+    for three ETFs. 
 
 | Greek | Order | What It Tells You |
 |-------|-------|-------------------|
