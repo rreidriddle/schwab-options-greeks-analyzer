@@ -8,6 +8,9 @@ Layout:
 
 Controls:
   Symbol dropdown  -> switch SPY / QQQ / DIA
+  DTE filter       -> 0DTE / 0-7 / 0-21 / 0-45
+  Expiry selector  -> isolate a single expiration date
+  Strike range     -> ±3% / ±5% / ±8% from spot
   Vanna toggle     -> Net / Call+Put split
   Charm toggle     -> Net / Call+Put split
   Ctrl+Scroll      -> zoom entire window
@@ -43,7 +46,14 @@ CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "YOUR_CLIENT_SECRET")
 RISK_FREE     = 0.045
 SYMBOLS       = ["SPY", "QQQ", "DIA"]
 SCHWAB_BASE   = "https://api.schwabapi.com/marketdata/v1"
-STRIKE_PCT    = 0.12
+STRIKE_PCT    = 0.08          # fetch range — generous so filters have room
+MAX_DTE       = 45            # hard cap: no LEAPS or far monthlies
+
+# DTE filter options (label -> max DTE)
+DTE_FILTERS   = {"0DTE": 0, "0-7": 7, "0-21": 21, "0-45": 45}
+
+# Strike range options (label -> pct from spot)
+STRIKE_RANGES = {"+/-3%": 0.03, "+/-5%": 0.05, "+/-8%": 0.08}
 
 C = {
     "bg":         "#0d0d0d", "panel":      "#111111",
@@ -68,7 +78,7 @@ def get_options_chain(token, symbol, spot):
     headers   = {"Authorization": f"Bearer {token}"}
     from_date = datetime.date.today().strftime("%Y-%m-%d")
     to_date   = (datetime.date.today() +
-                 datetime.timedelta(days=45)).strftime("%Y-%m-%d")
+                 datetime.timedelta(days=MAX_DTE)).strftime("%Y-%m-%d")
     params = {
         "symbol":           symbol,
         "contractType":     "ALL",
@@ -133,8 +143,11 @@ def parse_chain(chain, r=RISK_FREE):
                            ("put",  chain.get("putExpDateMap",  {}))]:
         call = (side == "call")
         for exp_key, strikes in exp_map.items():
-            try:    dte = float(exp_key.split(":")[1])
+            try:
+                exp_date = exp_key.split(":")[0]   # e.g. "2025-04-04"
+                dte      = float(exp_key.split(":")[1])
             except: continue
+            if dte > MAX_DTE: continue             # hard cap — no LEAPS
             T = dte / 365
             if T <= 0: continue
             for ks, contracts in strikes.items():
@@ -157,6 +170,7 @@ def parse_chain(chain, r=RISK_FREE):
                     "strike":       K,
                     "type":         side,
                     "dte":          dte,
+                    "expiry":       exp_date,
                     "oi":           oi,
                     # GEX: dollar-weighted, calls pos / puts neg
                     "GEX_call":     g  * mult * S if call     else 0,
@@ -171,6 +185,31 @@ def parse_chain(chain, r=RISK_FREE):
                     "CharmEX_put": -ch * mult      if not call else 0,
                 })
     return pd.DataFrame(rows)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FILTER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def filter_df(df, spot, dte_label="0-45", expiry="ALL", strike_pct=0.05):
+    """Apply DTE, expiry, and strike range filters to the raw dataframe."""
+    out = df.copy()
+
+    # DTE filter
+    max_dte = DTE_FILTERS.get(dte_label, 45)
+    if dte_label == "0DTE":
+        out = out[out["dte"] <= 1]
+    else:
+        out = out[out["dte"] <= max_dte]
+
+    # Expiry filter
+    if expiry != "ALL" and "expiry" in out.columns:
+        out = out[out["expiry"] == expiry]
+
+    # Strike range filter
+    out = out[((out["strike"] - spot).abs() / spot) <= strike_pct]
+
+    return out
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AGGREGATE
@@ -468,11 +507,14 @@ def launch_dashboard(all_data):
     sh  = root.winfo_screenheight()
     dpi = 96
 
-    sym_var     = tk.StringVar(value=list(all_data.keys())[0])
-    vanna_split = tk.BooleanVar(value=False)
-    charm_split = tk.BooleanVar(value=False)
+    sym_var      = tk.StringVar(value=list(all_data.keys())[0])
+    vanna_split  = tk.BooleanVar(value=False)
+    charm_split  = tk.BooleanVar(value=False)
+    dte_var      = tk.StringVar(value="0-45")
+    expiry_var   = tk.StringVar(value="ALL")
+    strike_var   = tk.StringVar(value="+/-5%")
 
-    # Control bar
+    # ── Control bar ────────────────────────────────────────────────────────────
     ctrl = tk.Frame(root, bg=C["ctrl"], pady=7, padx=14)
     ctrl.pack(side="top", fill="x")
 
@@ -484,9 +526,6 @@ def launch_dashboard(all_data):
         tk.Frame(ctrl, bg=C["border"], width=1).pack(
             side="left", fill="y", padx=10, pady=4)
 
-    tk.Label(ctrl, text="SYMBOL", fg=C["subtext"], bg=C["ctrl"],
-             font=("Courier New", 7)).pack(side="left", padx=(0, 4))
-
     sty = ttk.Style()
     sty.theme_use("clam")
     sty.configure("D.TCombobox",
@@ -494,12 +533,49 @@ def launch_dashboard(all_data):
         foreground=C["text"], selectbackground=C["btn_on"],
         selectforeground=C["text"], bordercolor=C["border"],
         arrowcolor=C["subtext"])
+
+    # Symbol
+    tk.Label(ctrl, text="SYMBOL", fg=C["subtext"], bg=C["ctrl"],
+             font=("Courier New", 7)).pack(side="left", padx=(0, 4))
     sym_cb = ttk.Combobox(ctrl, textvariable=sym_var,
                           values=list(all_data.keys()),
                           state="readonly", width=5,
                           style="D.TCombobox",
                           font=("Courier New", 10))
     sym_cb.pack(side="left", padx=(0, 6))
+    div()
+
+    # DTE filter
+    tk.Label(ctrl, text="DTE", fg=C["subtext"], bg=C["ctrl"],
+             font=("Courier New", 7)).pack(side="left", padx=(0, 4))
+    dte_cb = ttk.Combobox(ctrl, textvariable=dte_var,
+                          values=list(DTE_FILTERS.keys()),
+                          state="readonly", width=6,
+                          style="D.TCombobox",
+                          font=("Courier New", 10))
+    dte_cb.pack(side="left", padx=(0, 6))
+    div()
+
+    # Expiry selector
+    tk.Label(ctrl, text="EXPIRY", fg=C["subtext"], bg=C["ctrl"],
+             font=("Courier New", 7)).pack(side="left", padx=(0, 4))
+    expiry_cb = ttk.Combobox(ctrl, textvariable=expiry_var,
+                             values=["ALL"],
+                             state="readonly", width=11,
+                             style="D.TCombobox",
+                             font=("Courier New", 10))
+    expiry_cb.pack(side="left", padx=(0, 6))
+    div()
+
+    # Strike range
+    tk.Label(ctrl, text="RANGE", fg=C["subtext"], bg=C["ctrl"],
+             font=("Courier New", 7)).pack(side="left", padx=(0, 4))
+    range_cb = ttk.Combobox(ctrl, textvariable=strike_var,
+                            values=list(STRIKE_RANGES.keys()),
+                            state="readonly", width=6,
+                            style="D.TCombobox",
+                            font=("Courier New", 10))
+    range_cb.pack(side="left", padx=(0, 6))
     div()
 
     def make_toggle(label, var):
@@ -539,7 +615,7 @@ def launch_dashboard(all_data):
 
     tk.Frame(root, bg=C["border"], height=1).pack(fill="x")
 
-    # Figure layout: GEX left 40%, Vanna+Charm stacked right 60%
+    # ── Figure layout ──────────────────────────────────────────────────────────
     fig_w = sw / dpi
     fig_h = (sh - 52) / dpi
     fig   = plt.Figure(figsize=(fig_w, fig_h), facecolor=C["bg"], dpi=dpi)
@@ -610,19 +686,59 @@ def launch_dashboard(all_data):
 
     fig.canvas.mpl_connect("motion_notify_event", on_hover)
 
+    def _update_expiry_list(*_):
+        """Repopulate expiry dropdown when symbol or DTE filter changes."""
+        sym      = sym_var.get()
+        df, spot = all_data[sym]
+        dte_lbl  = dte_var.get()
+        filtered = filter_df(df, spot, dte_label=dte_lbl,
+                             expiry="ALL",
+                             strike_pct=STRIKE_RANGES.get(strike_var.get(), 0.05))
+        if "expiry" in filtered.columns:
+            expiries = sorted(filtered["expiry"].unique().tolist())
+        else:
+            expiries = []
+        expiry_cb["values"] = ["ALL"] + expiries
+        # Reset to ALL if current selection no longer valid
+        if expiry_var.get() not in ["ALL"] + expiries:
+            expiry_var.set("ALL")
+
     def render(*_):
         sym      = sym_var.get()
         df, spot = all_data[sym]
-        agg      = aggregate(df)
+
+        dte_lbl    = dte_var.get()
+        expiry_sel = expiry_var.get()
+        spct       = STRIKE_RANGES.get(strike_var.get(), 0.05)
+
+        fdf = filter_df(df, spot,
+                        dte_label=dte_lbl,
+                        expiry=expiry_sel,
+                        strike_pct=spct)
+
+        if fdf.empty:
+            for ax in [ax_gex, ax_vanna, ax_charm]:
+                ax.clear()
+                ax.set_facecolor(C["panel"])
+                ax.text(0.5, 0.5, "No data for selected filters",
+                        transform=ax.transAxes, ha="center", va="center",
+                        color=C["subtext"], fontsize=11)
+            canvas.draw()
+            return
+
+        agg = aggregate(fdf)
+
+        # Build filter label for title
+        expiry_lbl = f"  |  {expiry_sel}" if expiry_sel != "ALL" else ""
+        filter_lbl = f"DTE: {dte_lbl}  Range: {strike_var.get()}{expiry_lbl}"
 
         for ax in [ax_gex, ax_vanna, ax_charm]:
             ax.clear()
 
         draw_gex(ax_gex, agg, spot, sym)
 
-        # Store line data for hover (in same units as draw functions use)
-        nv = agg["VannEX"].values  / 1e6   # M units, matches draw_vanna
-        nc = agg["CharmEX"].values / 1e6   # M units, matches draw_charm
+        nv = agg["VannEX"].values  / 1e6
+        nc = agg["CharmEX"].values / 1e6
         _store_line(ax_vanna, agg["strike"].values, nv)
         _store_line(ax_charm, agg["strike"].values, nc)
 
@@ -630,14 +746,20 @@ def launch_dashboard(all_data):
         draw_charm(ax_charm, agg, spot, sym, charm_split.get())
 
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        fig.suptitle(f"{sym}   Spot ${spot:.2f}   {ts}",
+        fig.suptitle(f"{sym}   Spot ${spot:.2f}   {ts}   |   {filter_lbl}",
                      color=C["subtext"], fontsize=8.5,
                      x=0.5, y=0.975, fontfamily="monospace")
         canvas.draw()
         fig.savefig("dashboard.png", dpi=dpi,
                     bbox_inches="tight", facecolor=C["bg"])
 
-    sym_cb.bind("<<ComboboxSelected>>", render)
+    sym_cb.bind("<<ComboboxSelected>>", lambda e: [_update_expiry_list(), render()])
+    dte_cb.bind("<<ComboboxSelected>>", lambda e: [_update_expiry_list(), render()])
+    expiry_cb.bind("<<ComboboxSelected>>", render)
+    range_cb.bind("<<ComboboxSelected>>", render)
+
+    # Populate expiry list for initial symbol
+    _update_expiry_list()
 
     zoom = [1.0]; base_w = [sw]; base_h = [sh - 52]
 
@@ -671,8 +793,11 @@ def generate_demo_chain(spot, symbol):
     np.random.seed({"SPY": 42, "QQQ": 7, "DIA": 13}.get(symbol, 0))
     rows = []
     r    = RISK_FREE
-    for dte in [3, 7, 14, 21, 28, 45]:
-        T  = dte / 365
+    today = datetime.date.today()
+    for dte in [0, 3, 7, 14, 21, 28, 45]:
+        if dte > MAX_DTE: continue
+        T        = max(dte, 0.5) / 365
+        exp_date = (today + datetime.timedelta(days=dte)).strftime("%Y-%m-%d")
         lo = round(spot * (1 - STRIKE_PCT))
         hi = round(spot * (1 + STRIKE_PCT))
         for K in np.arange(lo, hi + 1, 1.0):
@@ -695,6 +820,7 @@ def generate_demo_chain(spot, symbol):
                     "strike":       round(K, 2),
                     "type":         side,
                     "dte":          dte,
+                    "expiry":       exp_date,
                     "oi":           oi,
                     "GEX_call":     g  * mult * spot if call     else 0,
                     "GEX_put":     -g  * mult * spot if not call else 0,
@@ -753,6 +879,8 @@ def main():
                 print(f"  {sym} ${spot:.2f}")
                 chain = get_options_chain(token, sym, spot)
                 df    = parse_chain(chain)
+                print(f"Available DTEs: {sorted(df['dte'].unique())}")
+                print(f"Available expiries: {sorted(df['expiry'].unique())}")
                 if df.empty:
                     print(f"  Empty chain for {sym}")
                     continue
