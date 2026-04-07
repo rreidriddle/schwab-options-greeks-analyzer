@@ -15,14 +15,23 @@ Controls:
   Charm toggle     -> Net / Call+Put split
   Ctrl+Scroll      -> zoom entire window
   R                -> reset zoom
+
+Auto-refresh:
+  Data refreshes every 5 minutes automatically in live mode.
+  Status indicator (●) in control bar:
+    Green  = data is fresh
+    Red    = fetching in progress
+    Yellow = refresh imminent (<30s)
+  Countdown timer shows time until next refresh.
 """
 
 from dotenv import load_dotenv
 load_dotenv()
 
-import os, time, warnings, datetime
+import os, time, warnings, datetime, threading
 import tkinter as tk
 from tkinter import ttk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import numpy as np
@@ -46,8 +55,11 @@ CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "YOUR_CLIENT_SECRET")
 RISK_FREE     = 0.045
 SYMBOLS       = ["SPY", "QQQ", "DIA"]
 SCHWAB_BASE   = "https://api.schwabapi.com/marketdata/v1"
-STRIKE_PCT    = 0.08          # fetch range — generous so filters have room
-MAX_DTE       = 45            # hard cap: no LEAPS or far monthlies
+STRIKE_PCT    = 0.08
+MAX_DTE       = 45
+
+# Auto-refresh interval in seconds (5 minutes)
+REFRESH_INTERVAL = 300
 
 # DTE filter options (label -> max DTE)
 DTE_FILTERS   = {"0DTE": 0, "0-7": 7, "0-21": 21, "0-45": 45}
@@ -68,11 +80,33 @@ C = {
     "ctrl":       "#0a0a0a", "btn_off":    "#161616",
     "btn_on":     "#2a1f3d", "live":       "#165129",
     "demo":       "#f97316",
+    "ind_green":  "#22c55e", "ind_red":    "#dc2626",
+    "ind_yellow": "#f59e0b",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHWAB API
 # ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_spot(token, symbol):
+    """Fetch current spot price for a single symbol."""
+    r = requests.get(
+        f"{SCHWAB_BASE}/quotes",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"symbols": symbol},
+        timeout=10,
+    )
+    r.raise_for_status()
+    qd = r.json()
+    try:
+        inner = qd.get(symbol, list(qd.values())[0] if qd else {})
+        spot  = (inner.get("quote", {}).get("lastPrice")
+                 or inner.get("lastPrice")
+                 or inner.get("mark"))
+    except Exception:
+        spot = None
+    return spot
+
 
 def get_options_chain(token, symbol, spot):
     headers   = {"Authorization": f"Bearer {token}"}
@@ -97,12 +131,50 @@ def get_options_chain(token, symbol, spot):
             r.raise_for_status()
             return r.json()
         except requests.exceptions.HTTPError:
-            if r.status_code in [502, 503, 504] and attempt < 2:
-                w = (attempt + 1) * 5
-                print(f"  {r.status_code} - retry in {w}s...")
+            if r.status_code in [429, 502, 503, 504] and attempt < 2:
+                w = (attempt + 1) * 3
+                print(f"  {r.status_code} on {symbol} — retry in {w}s...")
                 time.sleep(w)
                 continue
             raise
+
+
+def fetch_symbol_live(token, symbol):
+    """
+    Fetch spot + chain for one symbol.
+    A 1s pause between quote and chain avoids back-to-back hits on the same
+    symbol. No sleep between symbols — those run concurrently.
+    Returns (symbol, spot, chain) or raises on failure.
+    """
+    spot = fetch_spot(token, symbol)
+    if not spot:
+        raise ValueError(f"No spot price for {symbol}")
+    time.sleep(1)   # brief gap between quote and chain for same symbol
+    chain = get_options_chain(token, symbol, spot)
+    return symbol, spot, chain
+
+
+def fetch_all_symbols(token):
+    """Fetch all symbols concurrently. Returns dict {sym: (df, spot)}."""
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(SYMBOLS)) as executor:
+        futures = {
+            executor.submit(fetch_symbol_live, token, sym): sym
+            for sym in SYMBOLS
+        }
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                symbol, spot, chain = future.result()
+                df = parse_chain(chain)
+                if not df.empty:
+                    results[symbol] = (df, spot)
+                    print(f"  {symbol} ${spot:.2f} — {len(df)} rows")
+                else:
+                    print(f"  {symbol} — empty chain, skipping")
+            except Exception as e:
+                print(f"  {sym} failed: {e}")
+    return results
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BLACK-SCHOLES
@@ -129,11 +201,6 @@ def calc_charm(S, K, T, r, s, call):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PARSE CHAIN
-# Sign convention (dealer perspective):
-#   GEX   : calls positive, puts negative (* spot for dollar weighting)
-#   Vanna : sign * va * mult  (sign=-1 for puts flips negative raw vanna
-#           at OTM puts to positive, matching collector/database values)
-#   Charm : sign * ch * mult  (same sign convention as vanna)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_chain(chain, r=RISK_FREE):
@@ -144,10 +211,10 @@ def parse_chain(chain, r=RISK_FREE):
         call = (side == "call")
         for exp_key, strikes in exp_map.items():
             try:
-                exp_date = exp_key.split(":")[0]   # e.g. "2025-04-04"
+                exp_date = exp_key.split(":")[0]
                 dte      = float(exp_key.split(":")[1])
             except: continue
-            if dte > MAX_DTE: continue             # hard cap — no LEAPS
+            if dte > MAX_DTE: continue
             T = dte / 365
             if T <= 0: continue
             for ks, contracts in strikes.items():
@@ -172,14 +239,11 @@ def parse_chain(chain, r=RISK_FREE):
                     "dte":          dte,
                     "expiry":       exp_date,
                     "oi":           oi,
-                    # GEX: dollar-weighted, calls pos / puts neg
                     "GEX_call":     g  * mult * S if call     else 0,
                     "GEX_put":     -g  * mult * S if not call else 0,
-                    # Vanna: sign * va * mult (no spot multiplier)
                     "VannEX":       sign * va * mult,
                     "VannEX_call":  va * mult      if call     else 0,
                     "VannEX_put":  -va * mult      if not call else 0,
-                    # Charm: sign * ch * mult (no spot multiplier)
                     "CharmEX":      sign * ch * mult,
                     "CharmEX_call": ch * mult      if call     else 0,
                     "CharmEX_put": -ch * mult      if not call else 0,
@@ -191,25 +255,16 @@ def parse_chain(chain, r=RISK_FREE):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def filter_df(df, spot, dte_label="0-45", expiry="ALL", strike_pct=0.05):
-    """Apply DTE, expiry, and strike range filters to the raw dataframe."""
     out = df.copy()
-
-    # DTE filter
     max_dte = DTE_FILTERS.get(dte_label, 45)
     if dte_label == "0DTE":
         out = out[out["dte"] <= 1]
     else:
         out = out[out["dte"] <= max_dte]
-
-    # Expiry filter
     if expiry != "ALL" and "expiry" in out.columns:
         out = out[out["expiry"] == expiry]
-
-    # Strike range filter
     out = out[((out["strike"] - spot).abs() / spot) <= strike_pct]
-
     return out
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AGGREGATE
@@ -274,10 +329,6 @@ def _fill_signed(ax, x, y, pos_color, neg_color, alpha=0.15):
                     alpha=alpha, color=neg_color, zorder=2)
 
 def _clip_ymx(vals, pct=95, min_val=0.001):
-    """
-    Scale Y axis to the Nth percentile of absolute values.
-    Prevents a single outlier spike from compressing the rest of the chart.
-    """
     nonzero = np.abs(vals[vals != 0])
     if len(nonzero) == 0:
         return min_val
@@ -299,15 +350,12 @@ def _fmt_charm(x, _):
 
 def draw_gex(ax, agg, spot, symbol):
     _style(ax)
-
-    # 50 strikes nearest to spot
     plot_agg = (agg.copy()
                 .assign(dist=(agg["strike"] - spot).abs())
                 .nsmallest(50, "dist")
                 .sort_values("strike"))
 
     strikes = plot_agg["strike"].values
-    # Scale to K for readable axis labels
     call_v  = plot_agg["GEX_call"].values / 1e3
     put_v   = plot_agg["GEX_put"].values  / 1e3
     net_v   = plot_agg["GEX_net"].values  / 1e3
@@ -355,24 +403,17 @@ def draw_gex(ax, agg, spot, symbol):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VANNA CHART
-# Raw values stored in VannEX column are: sign * vanna * OI * 100
-# These are in raw greek units (not dollar-weighted).
-# At $630 strike with heavy put OI this produces large positive values ~30M.
-# We display in K units on the Y axis.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def draw_vanna(ax, agg, spot, symbol, split):
     _style(ax)
     strikes = agg["strike"].values
-
-    # Narrow x-axis to spot +/- 50 for readability
     xlo = spot - 50
     xhi = spot + 50
 
     ax.axhline(0, color=C["zero"], linewidth=0.8, zorder=3)
 
     if split:
-        # Display in M units
         cv = gaussian_filter1d(agg["VannEX_call"].values / 1e6, sigma=0.5)
         pv = gaussian_filter1d(agg["VannEX_put"].values  / 1e6, sigma=0.5)
         ax.plot(strikes, cv, color=C["vanna_call"], linewidth=2.0,
@@ -393,10 +434,9 @@ def draw_vanna(ax, agg, spot, symbol, split):
                             xytext=(0, 7), textcoords="offset points",
                             ha="center", zorder=6)
     else:
-        # Display in M units
-        nv     = agg["VannEX"].values / 1e6
-        nv_s   = gaussian_filter1d(nv, sigma=0.5)
-        all_v  = nv
+        nv    = agg["VannEX"].values / 1e6
+        nv_s  = gaussian_filter1d(nv, sigma=0.5)
+        all_v = nv
         ax.plot(strikes, nv_s, color=C["vanna_net"], linewidth=2.2,
                 label="Vanna", zorder=4)
         _fill_signed(ax, strikes, nv_s, C["net_pos"], C["net_neg"])
@@ -408,7 +448,6 @@ def draw_vanna(ax, agg, spot, symbol, split):
                         xytext=(0, 7), textcoords="offset points",
                         ha="center", zorder=6)
 
-    # Clip Y axis to 95th percentile so outlier spikes don't compress the chart
     ymx = _clip_ymx(all_v)
     ax.set_ylim(-ymx, ymx)
     ax.set_xlim(xlo, xhi)
@@ -419,31 +458,27 @@ def draw_vanna(ax, agg, spot, symbol, split):
             fontsize=8, ha="center", fontweight="bold", zorder=6)
 
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(
-            lambda x, _: f"{x:.0f}M"
-        ))
-    ax.set_xlabel("Strike",  color=C["subtext"], fontsize=8)
+            lambda x, _: f"{x:.0f}M"))
+    ax.set_xlabel("Strike",    color=C["subtext"], fontsize=8)
     ax.set_ylabel("Vanna (M)", color=C["subtext"], fontsize=8)
     _title(ax, f"{'Vanna Exposure' if split else 'Net Vanna Exposure'}  -  {symbol}")
     _legend(ax, "upper left")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CHARM CHART
-# Raw values stored in CharmEX column are: sign * charm * OI * 100
-# Displayed in M units on Y axis.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def draw_charm(ax, agg, spot, symbol, split):
     _style(ax)
     strikes = agg["strike"].values
-
     xlo = spot - 50
     xhi = spot + 50
 
     ax.axhline(0, color=C["zero"], linewidth=0.8, zorder=3)
 
     if split:
-        cc    = gaussian_filter1d(agg["CharmEX_call"].values / 1e6, sigma=0.5)
-        pc    = gaussian_filter1d(agg["CharmEX_put"].values  / 1e6, sigma=0.5)
+        cc  = gaussian_filter1d(agg["CharmEX_call"].values / 1e6, sigma=0.5)
+        pc  = gaussian_filter1d(agg["CharmEX_put"].values  / 1e6, sigma=0.5)
         ax.plot(strikes, cc, color=C["charm_call"], linewidth=2.0,
                 label="Call Charm", zorder=4)
         ax.plot(strikes, pc, color=C["charm_put"],  linewidth=2.0,
@@ -486,9 +521,8 @@ def draw_charm(ax, agg, spot, symbol, split):
             fontsize=8, ha="center", fontweight="bold", zorder=6)
 
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(
-        lambda x, _: f"{x*1000:.1f}K" if abs(x) < 1 else f"{x:.1f}M"
-    ))
-    ax.set_xlabel("Strike",  color=C["subtext"], fontsize=8)
+        lambda x, _: f"{x*1000:.1f}K" if abs(x) < 1 else f"{x:.1f}M"))
+    ax.set_xlabel("Strike",    color=C["subtext"], fontsize=8)
     ax.set_ylabel("Charm (M)", color=C["subtext"], fontsize=8)
     _title(ax, f"{'Charm Exposure' if split else 'Net Charm Exposure'}  -  {symbol}")
     _legend(ax, "upper left")
@@ -497,7 +531,11 @@ def draw_charm(ax, agg, spot, symbol, split):
 # TKINTER DASHBOARD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def launch_dashboard(all_data):
+def launch_dashboard(all_data, demo=False):
+    """
+    all_data : dict {symbol: (df, spot)}
+    demo     : True if running without live credentials
+    """
     root = tk.Tk()
     root.title("Options Greeks Analyzer")
     root.configure(bg=C["bg"])
@@ -507,12 +545,16 @@ def launch_dashboard(all_data):
     sh  = root.winfo_screenheight()
     dpi = 96
 
-    sym_var      = tk.StringVar(value=list(all_data.keys())[0])
-    vanna_split  = tk.BooleanVar(value=False)
-    charm_split  = tk.BooleanVar(value=False)
-    dte_var      = tk.StringVar(value="0-45")
-    expiry_var   = tk.StringVar(value="ALL")
-    strike_var   = tk.StringVar(value="+/-5%")
+    # Shared mutable data store — updated by background refresh thread
+    _data_lock = threading.Lock()
+    _live_data = {"data": dict(all_data)}   # {sym: (df, spot)}
+
+    sym_var     = tk.StringVar(value=list(all_data.keys())[0])
+    vanna_split = tk.BooleanVar(value=False)
+    charm_split = tk.BooleanVar(value=False)
+    dte_var     = tk.StringVar(value="0-45")
+    expiry_var  = tk.StringVar(value="ALL")
+    strike_var  = tk.StringVar(value="+/-5%")
 
     # ── Control bar ────────────────────────────────────────────────────────────
     ctrl = tk.Frame(root, bg=C["ctrl"], pady=7, padx=14)
@@ -604,14 +646,41 @@ def launch_dashboard(all_data):
     make_toggle("CHARM", charm_split)
     div()
 
-    live = CLIENT_ID != "YOUR_CLIENT_ID"
+    # ── Right side of control bar: status indicator + countdown ───────────────
+    # Live/Demo badge
     tk.Label(ctrl,
-             text="LIVE" if live else "DEMO",
-             fg=C["live"] if live else C["demo"], bg=C["ctrl"],
-             font=("Courier New", 9, "bold")).pack(side="right", padx=10)
+             text="LIVE" if not demo else "DEMO",
+             fg=C["live"] if not demo else C["demo"], bg=C["ctrl"],
+             font=("Courier New", 9, "bold")).pack(side="right", padx=(10, 4))
+
     tk.Label(ctrl, text="Ctrl+Scroll: Zoom  |  R: Reset",
              fg=C["subtext"], bg=C["ctrl"],
              font=("Courier New", 7)).pack(side="right", padx=10)
+
+    # Only show refresh indicator in live mode
+    if not demo:
+        div_r = tk.Frame(ctrl, bg=C["border"], width=1)
+        div_r.pack(side="right", fill="y", padx=10, pady=4)
+
+        # Countdown label  e.g. "next 4:52"
+        countdown_var = tk.StringVar(value="")
+        tk.Label(ctrl, textvariable=countdown_var,
+                 fg=C["subtext"], bg=C["ctrl"],
+                 font=("Courier New", 8)).pack(side="right", padx=(0, 6))
+
+        # Status dot  ●
+        ind_color = tk.StringVar(value=C["ind_green"])
+        ind_label = tk.Label(ctrl, text="●",
+                             fg=C["ind_green"], bg=C["ctrl"],
+                             font=("Courier New", 14))
+        ind_label.pack(side="right", padx=(0, 2))
+
+        def _set_indicator(state: str):
+            """state: 'green' | 'red' | 'yellow'"""
+            color = {"green": C["ind_green"],
+                     "red":   C["ind_red"],
+                     "yellow": C["ind_yellow"]}[state]
+            ind_label.config(fg=color)
 
     tk.Frame(root, bg=C["border"], height=1).pack(fill="x")
 
@@ -634,12 +703,11 @@ def launch_dashboard(all_data):
     cw     = canvas.get_tk_widget()
     cw.pack(fill="both", expand=True)
 
-    # Hover tooltip — shows nearest datapoint Strike/Value and cursor position
+    # Hover tooltip
     tooltip = tk.Label(root, text="", bg="#1a1a2e", fg=C["text"],
                        font=("Courier New", 8), relief="flat",
                        borderwidth=1, padx=8, pady=5, justify="left")
 
-    # Store line data per axis for nearest-point lookup
     _line_data = {}
 
     def _store_line(ax, x_vals, y_vals):
@@ -663,7 +731,6 @@ def launch_dashboard(all_data):
         if x is None or y is None:
             tooltip.place_forget()
             return
-
         dat = _line_data.get(id(ax))
         if dat is not None and len(dat["x"]) > 0:
             idx  = int(np.argmin(np.abs(dat["x"] - x)))
@@ -673,10 +740,9 @@ def launch_dashboard(all_data):
                     f"Value  : {_fmt_tip(ny)}\n"
                     f"Cursor : {_fmt_tip(y)}")
         else:
-                    tooltip.place_forget()
-                    return
+            tooltip.place_forget()
+            return
         tooltip.config(text=text)
-
         ptr_x = root.winfo_pointerx() - root.winfo_rootx()
         ptr_y = root.winfo_pointery() - root.winfo_rooty()
         wx = min(max(ptr_x + 15, 5), root.winfo_width()  - 160)
@@ -686,10 +752,12 @@ def launch_dashboard(all_data):
 
     fig.canvas.mpl_connect("motion_notify_event", on_hover)
 
+    # ── Render ──────────────────────────────────────────────────────────────────
+
     def _update_expiry_list(*_):
-        """Repopulate expiry dropdown when symbol or DTE filter changes."""
         sym      = sym_var.get()
-        df, spot = all_data[sym]
+        with _data_lock:
+            df, spot = _live_data["data"][sym]
         dte_lbl  = dte_var.get()
         filtered = filter_df(df, spot, dte_label=dte_lbl,
                              expiry="ALL",
@@ -699,13 +767,13 @@ def launch_dashboard(all_data):
         else:
             expiries = []
         expiry_cb["values"] = ["ALL"] + expiries
-        # Reset to ALL if current selection no longer valid
         if expiry_var.get() not in ["ALL"] + expiries:
             expiry_var.set("ALL")
 
     def render(*_):
-        sym      = sym_var.get()
-        df, spot = all_data[sym]
+        sym = sym_var.get()
+        with _data_lock:
+            df, spot = _live_data["data"][sym]
 
         dte_lbl    = dte_var.get()
         expiry_sel = expiry_var.get()
@@ -728,7 +796,6 @@ def launch_dashboard(all_data):
 
         agg = aggregate(fdf)
 
-        # Build filter label for title
         expiry_lbl = f"  |  {expiry_sel}" if expiry_sel != "ALL" else ""
         filter_lbl = f"DTE: {dte_lbl}  Range: {strike_var.get()}{expiry_lbl}"
 
@@ -758,7 +825,6 @@ def launch_dashboard(all_data):
     expiry_cb.bind("<<ComboboxSelected>>", render)
     range_cb.bind("<<ComboboxSelected>>", render)
 
-    # Populate expiry list for initial symbol
     _update_expiry_list()
 
     zoom = [1.0]; base_w = [sw]; base_h = [sh - 52]
@@ -782,6 +848,70 @@ def launch_dashboard(all_data):
 
     root.bind("<MouseWheel>", on_scroll)
     root.bind("<Key>", on_key)
+
+    # ── Auto-refresh (live mode only) ──────────────────────────────────────────
+
+    if not demo:
+        _refresh_state = {
+            "last_refresh": time.time(),   # timestamp of last successful fetch
+            "fetching":     False,
+        }
+
+        def _do_refresh():
+            """Background thread: fetch all symbols, update shared data, re-render."""
+            _refresh_state["fetching"] = True
+            root.after(0, lambda: _set_indicator("red"))
+
+            try:
+                from auth import get_valid_access_token
+                token    = get_valid_access_token(silent=True)
+                new_data = fetch_all_symbols(token)
+
+                if new_data:
+                    with _data_lock:
+                        _live_data["data"].update(new_data)
+                    _refresh_state["last_refresh"] = time.time()
+                    # Re-render on the main thread
+                    root.after(0, _update_expiry_list)
+                    root.after(0, render)
+                    root.after(0, lambda: _set_indicator("green"))
+                else:
+                    # Fetch returned nothing — stay red briefly then go green
+                    root.after(0, lambda: _set_indicator("green"))
+
+            except Exception as e:
+                print(f"  Auto-refresh failed: {e}")
+                root.after(0, lambda: _set_indicator("green"))
+            finally:
+                _refresh_state["fetching"] = False
+
+        def _tick():
+            """
+            Called every second by root.after.
+            Manages the countdown display and triggers refresh when due.
+            """
+            if not _refresh_state["fetching"]:
+                elapsed   = time.time() - _refresh_state["last_refresh"]
+                remaining = max(0, REFRESH_INTERVAL - elapsed)
+                m  = int(remaining) // 60
+                s  = int(remaining) % 60
+                countdown_var.set(f"next {m}:{s:02d}")
+
+                # Warn when <30s until refresh
+                if remaining <= 30:
+                    _set_indicator("yellow")
+
+                # Trigger refresh
+                if remaining <= 0:
+                    t = threading.Thread(target=_do_refresh, daemon=True)
+                    t.start()
+            else:
+                countdown_var.set("fetching...")
+
+            root.after(1000, _tick)
+
+        _tick()
+
     render()
     root.mainloop()
 
@@ -843,7 +973,7 @@ def main():
     demo = (CLIENT_ID == "YOUR_CLIENT_ID")
 
     if demo:
-        print("DEMO mode - add credentials to .env for live data\n")
+        print("DEMO mode — add credentials to .env for live data\n")
         all_data = {}
         for sym in SYMBOLS:
             spot          = DEMO_SPOTS[sym]
@@ -853,49 +983,17 @@ def main():
     else:
         from auth import get_valid_access_token
         token    = get_valid_access_token()
-        all_data = {}
-
-        for sym in SYMBOLS:
-            print(f"  Fetching {sym}...")
-            time.sleep(5)
-            try:
-                qr = requests.get(
-                    f"{SCHWAB_BASE}/quotes",
-                    headers={"Authorization": f"Bearer {token}"},
-                    params={"symbols": sym},
-                    timeout=10,
-                )
-                qd = qr.json()
-                try:
-                    inner = qd.get(sym, list(qd.values())[0] if qd else {})
-                    spot  = (inner.get("quote", {}).get("lastPrice")
-                             or inner.get("lastPrice")
-                             or inner.get("mark"))
-                except Exception:
-                    spot = None
-                if not spot:
-                    print(f"  No spot price for {sym}: {qd}")
-                    continue
-                print(f"  {sym} ${spot:.2f}")
-                chain = get_options_chain(token, sym, spot)
-                df    = parse_chain(chain)
-                print(f"Available DTEs: {sorted(df['dte'].unique())}")
-                print(f"Available expiries: {sorted(df['expiry'].unique())}")
-                if df.empty:
-                    print(f"  Empty chain for {sym}")
-                    continue
-                all_data[sym] = (df, spot)
-                print_summary(sym, df, spot)
-            except Exception as e:
-                print(f"  Failed {sym}: {e}")
-                continue
+        print("Fetching all symbols concurrently...")
+        all_data = fetch_all_symbols(token)
+        for sym, (df, spot) in all_data.items():
+            print_summary(sym, df, spot)
 
     if not all_data:
         print("No data loaded.")
         return
 
     print("Launching dashboard...")
-    launch_dashboard(all_data)
+    launch_dashboard(all_data, demo=demo)
 
 
 if __name__ == "__main__":

@@ -50,12 +50,13 @@ flows as expirations get closer.
 ## Project Structure
 
 ```
-schwab-options-greeks-analyzer/
-├── options_greeks_analyzer.py   # Main script — Greeks engine + API + dashboard
+black-scholes-greeks-dashboard/
+├── gex-dashboard.py   # Main script — Greeks engine + API + dashboard
 ├── requirements.txt             # Python dependencies
 ├── .env                         # API credentials (not tracked by Git)
 ├── .gitignore                   # Protects credentials and cache files
-└── README.md                    # This file
+├── README.md                    # This file
+└── auth.py                      # Authenticator for Schwab API
 ```
 ## Sample Output — Console Summary
 
