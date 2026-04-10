@@ -86,11 +86,6 @@ Vanna and Charm exposure curves. Key levels such as spot price, gamma flip, and 
 are overlaid on the GEX chart. Use the control bar to filter by DTE, expiration date,
 and strike range, or toggle Vanna and Charm between net and call/put split views.
 
-**Max Pain** is the strike price at which the greatest number of options contracts
-expire worthless in aggregate across both calls and puts. As expiration approaches,
-delta hedging flows can create a natural gravitational pull toward this level.
-This is most relevant during the final hour of an expiration session, just like Charm.
-
 ### Vol Smile
 Plots implied volatility across strikes for both calls and puts, with spot price marked.
 The shape of this curve reveals where the market is pricing risk. A classic volatility

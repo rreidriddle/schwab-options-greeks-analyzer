@@ -1569,7 +1569,19 @@ def launch_dashboard(all_data, demo=False, vix_data=None):
             try:
                 import db
                 import schwab_price
-
+            except ImportError:
+                def _draw():
+                    ax_bt_gex.clear()
+                    ax_bt_gex.set_facecolor(C["panel"])
+                    ax_bt_gex.text(0.5, 0.5,
+                        "Backtest requires the schwab-greeks-historical-data\npipeline. See README for setup.",
+                        transform=ax_bt_gex.transAxes, ha="center", va="center",
+                        color=C["subtext"], fontsize=11)
+                    bt_canvas.draw()
+                    bt_status_var.set("Missing database module.")
+                root.after(0, _draw)
+                _bt_fetch_lock.release()
+                return    
                 # ── Left: GEX surface from database ───────────────────────────
                 # Initialize defaults — overridden below based on data available
                 has_gex       = False
