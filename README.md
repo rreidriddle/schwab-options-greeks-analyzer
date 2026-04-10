@@ -45,6 +45,52 @@ guaranteed flows as expirations get closer.
 
 ---
 
+## Modules
+
+### GEX / VannEX / CharmEX (Charts)
+The main module. Displays a horizontal bar chart of Gamma Exposure by strike alongside
+Vanna and Charm exposure curves. Key levels such as spot price, gamma flip, and max pain
+are overlaid on the GEX chart. Use the control bar to filter by DTE, expiration date,
+and strike range, or toggle Vanna and Charm between net and call/put split views.
+
+### Vol Smile
+Plots implied volatility across strikes for both calls and puts, with spot price marked.
+The shape of this curve reveals where the market is pricing risk. A classic volatility
+skew is asymmetric; OTM puts carry higher IV than equidistant OTM calls, driven by
+demand for downside protection. A volatility smile is symmetric, with IV being lowest ATM,
+indicating the market is pricing the possibility of a large move in
+either direction. This connects directly to the VannEX chart. A steeper skew means higher
+vanna sensitivity and stronger mechanical hedging flows when IV moves.
+
+### Backtest
+Using the calendar widget, you can select any historical date to visualize that day's
+opening GEX snapshot alongside its full open-to-close price action. This allows you to
+study how price moved relative to key GEX levels: call walls, put walls, the gamma flip,
+and max pain. This graphs how dealer positioning influenced intraday structure.
+The backtest module reads from greeks_history.db via db.py, a read-only database access
+layer produced by the schwab-greeks-historical-data collection tool.
+
+> **Note:** This repo contains only the dashboard framework. A historical greeks database is
+> required to populate the backtest. See
+> [schwab-greeks-historical-data](https://github.com/rreidriddle/schwab-greeks-historical-data)
+> for the data collection and storage pipeline.
+
+---
+
+## Project Structure
+
+```
+black-scholes-greeks-dashboard/
+├── gex-dashboard.py             # Main script — Greeks engine + API + dashboard
+├── requirements.txt             # Python dependencies
+├── .env                         # API credentials (not tracked by Git)
+├── .gitignore                   # Protects credentials and cache files
+├── README.md                    # This file
+└── auth.py                      # Authenticator for Schwab API
+```
+
+---
+
 ## Usage
 
 ### Demo Mode
@@ -77,48 +123,6 @@ Live mode fetches real-time options chains for SPY, QQQ, and DIA, auto-refreshin
 every 5 minutes. A status indicator in the control bar shows refresh state.
 
 ---
-
-## Modules
-
-### GEX / VannEX / CharmEX (Charts)
-The main module. Displays a horizontal bar chart of Gamma Exposure by strike alongside
-Vanna and Charm exposure curves. Key levels such as spot price, gamma flip, and max pain
-are overlaid on the GEX chart. Use the control bar to filter by DTE, expiration date,
-and strike range, or toggle Vanna and Charm between net and call/put split views.
-
-### Vol Smile
-Plots implied volatility across strikes for both calls and puts, with spot price marked.
-The shape of this curve reveals where the market is pricing risk. A classic volatility
-skew is asymmetric; OTM puts carry higher IV than equidistant OTM calls, driven by
-demand for downside protection. A volatility smile is symmetric, with IV being lowest ATM,
-indicating the market is pricing the possibility of a large move in
-either direction. This connects directly to the VannEX chart. A steeper skew means higher
-vanna sensitivity and stronger mechanical hedging flows when IV moves.
-
-### Backtest
-Using the calendar widget, you can select any historical date to visualize that day's
-opening GEX snapshot alongside its full open-to-close price action. This allows you to
-study how price moved relative to key GEX levels — call walls, put walls, the gamma flip,
-and max pain — and build intuition for how dealer positioning influences intraday structure.
-
-> **Note:** This repo contains only the dashboard framework. Historical Greeks data is
-> required to populate the backtest. See
-> [schwab-greeks-historical-data](https://github.com/rreidriddle/schwab-greeks-historical-data)
-> for the data collection and storage pipeline.
-
----
-
-## Project Structure
-
-```
-black-scholes-greeks-dashboard/
-├── gex-dashboard.py             # Main script — Greeks engine + API + dashboard
-├── requirements.txt             # Python dependencies
-├── .env                         # API credentials (not tracked by Git)
-├── .gitignore                   # Protects credentials and cache files
-├── README.md                    # This file
-└── auth.py                      # Authenticator for Schwab API
-```
 
 ## Installation
 
