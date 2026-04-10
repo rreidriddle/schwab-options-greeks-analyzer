@@ -6,7 +6,6 @@ GammaEX, VannaEX, and CharmEX for market maker hedging flows.
 
 ![Options Greeks Dashboard](dashboard.png)
 
-
 ---
 
 ## What It Does
@@ -20,16 +19,13 @@ GammaEX, VannaEX, and CharmEX for market maker hedging flows.
 - Aggregates net dealer exposure by strike across all expirations, scaled by
     open interest and the options multiplier
 - Renders a multi-panel dashboard showing GammaEX, VannaEX, and CharmEX
-    for three ETFs. 
+    for three ETFs
 
 | Greek | Order | What It Tells You |
 |-------|-------|-------------------|
-| **Gamma (GEX)** | 2nd | How dealer delta changes per $1 move - positive GEX stabilizes price, negative GEX amplifies moves |
-| **Vanna (VannEX)** | 2nd | How dealer delta changes when IV moves drives mechanical flows after VIX spikes/drops |
-| **Charm (CharmEX)** | 2nd | How dealer delta changes as time passes creates predictable intraday drift even with no price move |
-| **Vomma (VommEX)** | 2nd | How vega changes with IV, measures convexity of volatility exposure |
-| **Speed** | 3rd | How gamma changes per $1 move: gamma of gamma |
-| **Color** | 3rd | How gamma changes per day: gamma decay |
+| **Gamma (GEX)** | 2nd | How dealer delta changes per $1 move — positive GEX stabilizes price, negative GEX amplifies moves |
+| **Vanna (VannEX)** | 2nd | How dealer delta changes when IV moves — drives mechanical flows after VIX spikes/drops |
+| **Charm (CharmEX)** | 2nd | How dealer delta changes as time passes — creates predictable intraday drift even with no price move |
 
 ### Why This Matters for Markets
 
@@ -43,53 +39,150 @@ volatility. When IV moves dealers are forced to buy or sell the underlying to he
 The direction and magnitude of those flows can be found in the vanna profile before
 the move ever happens.
 
-Charm represents delta decay, as dealers delta decays from options they have sold
-they must buy or sell shares to hedge. Charm gives us an idea of those guaranteed
-flows as expirations get closer. 
+Charm represents delta decay. As dealers' delta decays from options they have sold,
+they must buy or sell shares to rebalance their hedge. Charm gives us an idea of those
+guaranteed flows as expirations get closer.
+
+---
+
+## Usage
+
+### Demo Mode
+No credentials required. Run the script with no `.env` file and it launches automatically
+in demo mode using a synthetic SPY dataset modelled on real market structure:
+
+```bash
+python gex-dashboard.py
+```
+
+The demo runs the full Greeks engine on simulated options chain data — same Black-Scholes
+calculations as live mode, with realistic OI distribution, volatility skew, and key levels.
+The BACKTEST module requires live mode and will display a message if accessed in demo.
+
+### Live Mode
+Add your Schwab API credentials to a `.env` file in the project root:
+
+```
+SCHWAB_CLIENT_ID=your_client_id
+SCHWAB_CLIENT_SECRET=your_client_secret
+```
+
+Run `auth.py` first to complete Schwab's OAuth flow and cache your access token, then:
+
+```bash
+python gex-dashboard.py
+```
+
+Live mode fetches real-time options chains for SPY, QQQ, and DIA, auto-refreshing
+every 5 minutes. A status indicator in the control bar shows refresh state.
+
+---
+
+## Modules
+
+### GEX / VannEX / CharmEX (Charts)
+The main module. Displays a horizontal bar chart of Gamma Exposure by strike alongside
+Vanna and Charm exposure curves. Key levels such as spot price, gamma flip, and max pain
+are overlaid on the GEX chart. Use the control bar to filter by DTE, expiration date,
+and strike range, or toggle Vanna and Charm between net and call/put split views.
+
+**Max Pain** is the strike price at which the greatest number of options contracts
+expire worthless in aggregate across both calls and puts. As expiration approaches,
+delta hedging flows can create a natural gravitational pull toward this level.
+This is most relevant during the final hour of an expiration session, just like Charm.
+
+### Vol Smile
+Plots implied volatility across strikes for both calls and puts, with spot price marked.
+The shape of this curve reveals where the market is pricing risk. A classic volatility
+skew is asymmetric; OTM puts carry higher IV than equidistant OTM calls, driven by
+demand for downside protection. A volatility smile is symmetric, with IV being lowest ATM,
+indicating the market is pricing the possibility of a large move in
+either direction. This connects directly to the VannEX chart. A steeper skew means higher
+vanna sensitivity and stronger mechanical hedging flows when IV moves.
+
+### Backtest
+Using the calendar widget, you can select any historical date to visualize that day's
+opening GEX snapshot alongside its full open-to-close price action. This allows you to
+study how price moved relative to key GEX levels — call walls, put walls, the gamma flip,
+and max pain — and build intuition for how dealer positioning influences intraday structure.
+
+> **Note:** This repo contains only the dashboard framework. Historical Greeks data is
+> required to populate the backtest. See
+> [schwab-greeks-historical-data](https://github.com/rreidriddle/schwab-greeks-historical-data)
+> for the data collection and storage pipeline.
+
+---
 
 ## Project Structure
 
 ```
 black-scholes-greeks-dashboard/
-├── gex-dashboard.py   # Main script — Greeks engine + API + dashboard
+├── gex-dashboard.py             # Main script — Greeks engine + API + dashboard
 ├── requirements.txt             # Python dependencies
 ├── .env                         # API credentials (not tracked by Git)
 ├── .gitignore                   # Protects credentials and cache files
 ├── README.md                    # This file
 └── auth.py                      # Authenticator for Schwab API
 ```
+
+## Installation
+
+**Prerequisites**
+- Python 3.12+
+- Charles Schwab API credentials (see[developer.schwab.com](https://developer.schwab.com))
+
+**Clone the repo and install dependencies**
+```bash
+git clone https://github.com/rreidriddle/black-scholes-greeks-dashboard.git
+cd black-scholes-greeks-dashboard
+pip install -r requirements.txt
+```
+
+**Set up credentials**
+
+Create a `.env` file in the project root:
+```
+SCHWAB_CLIENT_ID=your_client_id
+SCHWAB_CLIENT_SECRET=your_client_secret
+```
+
+**Authenticate**
+
+Run `auth.py` once to complete Schwab's OAuth flow and cache your access token:
+```bash
+python auth.py
+```
+You will be prompted to log in via browser. Once complete, your token is cached locally
+and the dashboard will auto-refresh it as needed.
+
+**Run**
+```bash
+python gex-dashboard.py
+```
+
 ## Sample Output — Console Summary
 
 ```
-SPY...
-  $652.24
+══════════════════════════════════════════════════════════
+  SPY  |  Spot $679.66  |  OI 4,245,570
+══════════════════════════════════════════════════════════
+  Net GEX     $+0.531B  POSITIVE
+  Net VannEX  $+253270K
+  Net CharmEX -2.4584M
 
 ══════════════════════════════════════════════════════════
-  SPY  |  Spot $652.24  |  OI 5,744,260
+  QQQ  |  Spot $611.50  |  OI 2,649,282
 ══════════════════════════════════════════════════════════
-  Net GEX     $-0.954B  NEGATIVE
-  Net VannEX  $+262.6M
-  Net CharmEX -4404.4K
-
-QQQ...
-  $580.19
+  Net GEX     $+0.429B  POSITIVE
+  Net VannEX  $+115152K
+  Net CharmEX -1.3930M
 
 ══════════════════════════════════════════════════════════
-  QQQ  |  Spot $580.19  |  OI 2,690,690
+  DIA  |  Spot $479.40  |  OI 85,254
 ══════════════════════════════════════════════════════════
-  Net GEX     $-0.096B  NEGATIVE
-  Net VannEX  $+92.4M
-  Net CharmEX -1508.6K
-
-DIA...
-  $463.76
-
-══════════════════════════════════════════════════════════
-  DIA  |  Spot $463.76  |  OI 86,449
-══════════════════════════════════════════════════════════
-  Net GEX     $+0.001B  POSITIVE
-  Net VannEX  $+4.1M
-  Net CharmEX -60.4K
+  Net GEX     $+0.022B  POSITIVE
+  Net VannEX  $+3950K
+  Net CharmEX -0.0327M
 
 ```
 
@@ -98,4 +191,4 @@ DIA...
 **Reid Riddle**
 
 - GitHub: [@rreidriddle](https://github.com/rreidriddle)
-- LinkedIn: (https://www.linkedin.com/in/rreidriddle/)
+- LinkedIn: [linkedin.com/in/rreidriddle](https://www.linkedin.com/in/rreidriddle/)
