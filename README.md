@@ -223,10 +223,3 @@ python gex-dashboard.py
   Net CharmEX -2.4584M
 
 ```
-
-## Author
-
-**Reid Riddle**
-
-- GitHub: [@rreidriddle](https://github.com/rreidriddle)
-- LinkedIn: [linkedin.com/in/rreidriddle](https://www.linkedin.com/in/rreidriddle/)
