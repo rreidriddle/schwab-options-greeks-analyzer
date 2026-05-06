@@ -3,24 +3,15 @@ db.py — Greeks Database Access Layer
 =====================================
 Read-only interface to greeks_history.db populated by collector.py.
 
+Changes from v1:
+  - Added get_latest_macro() — most recent macro_snapshot row
+  - Added get_macro_history() — macro_snapshot over date range
+  - Added get_yield_curve() — today + yesterday curves for MACRO tab
+  - Added get_combined_signal() — latest macro regime + signal string
+  - All existing functions unchanged
+
 All functions return clean pandas DataFrames or scalar values.
-All functions return empty DataFrames / None gracefully when:
-  - The database file does not exist
-  - The requested symbol has no data
-  - The date range contains no records
-  - Any query or connection error occurs
-
-This module is imported by:
-  - gex-dashboard.py  (max pain line, key levels display)
-  - backtest_engine.py (future — strategy simulation)
-  - Any other tool that needs historical Greeks data
-
-Architecture note:
-  Data sources are intentionally separated. This module handles Greeks
-  history from the collector database. Price history (OHLCV) lives in
-  schwab_price.py. When a paid Greeks API is integrated later, add an
-  adapter here that returns the same DataFrame schemas — the dashboard
-  and backtest engine will not need to change.
+All functions return empty DataFrames / None gracefully on failure.
 """
 
 import os
@@ -38,24 +29,16 @@ load_dotenv()
 
 DB_PATH = os.environ.get("GREEKS_DB_PATH", "greeks_history.db")
 
-# Gamma regime thresholds — overridable per query for backtesting sensitivity
-# analysis (e.g. "what if I use a tighter flip zone?")
-REGIME_STRONG_POS_THRESHOLD  =  2e9   # net GEX > $2B  → STRONG_POS
-REGIME_WEAK_POS_THRESHOLD    =  0.0   # net GEX > $0   → WEAK_POS
-REGIME_FLIP_ZONE_PCT         =  0.005 # spot within 0.5% of flip → FLIP_ZONE
-REGIME_WEAK_NEG_THRESHOLD    = -2e9   # net GEX > -$2B → WEAK_NEG
-                                       # net GEX <= -$2B → STRONG_NEG
+REGIME_STRONG_POS_THRESHOLD  =  2e9
+REGIME_WEAK_POS_THRESHOLD    =  0.0
+REGIME_FLIP_ZONE_PCT         =  0.005
+REGIME_WEAK_NEG_THRESHOLD    = -2e9
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONNECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_connection(path: str = None) -> sqlite3.Connection | None:
-    """
-    Open a read-only SQLite connection to the Greeks database.
-    Returns None if the database file does not exist.
-    Caller is responsible for closing the connection.
-    """
     db = path or DB_PATH
     if not os.path.exists(db):
         warnings.warn(f"db.py: database not found at '{db}'. "
@@ -63,7 +46,6 @@ def get_connection(path: str = None) -> sqlite3.Connection | None:
                       stacklevel=2)
         return None
     try:
-        # uri=True allows read-only mode via SQLite URI
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True,
                                check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -75,7 +57,6 @@ def get_connection(path: str = None) -> sqlite3.Connection | None:
 
 
 def _empty_summary() -> pd.DataFrame:
-    """Return an empty DataFrame matching the summary table schema."""
     cols = [
         "timestamp", "symbol", "spot",
         "net_GEX", "net_VannEX", "net_CharmEX",
@@ -89,7 +70,6 @@ def _empty_summary() -> pd.DataFrame:
 
 
 def _empty_strikes() -> pd.DataFrame:
-    """Return an empty DataFrame matching the strike_data table schema."""
     cols = [
         "timestamp", "symbol", "spot", "strike", "dte", "dte_bucket",
         "GEX_call", "GEX_put", "GEX_net",
@@ -99,30 +79,28 @@ def _empty_strikes() -> pd.DataFrame:
     ]
     return pd.DataFrame(columns=cols)
 
+
+def _empty_macro() -> pd.DataFrame:
+    cols = [
+        "timestamp",
+        "tlt_price", "tlt_change", "tlt_chg_pct",
+        "uso_price", "uso_change", "uso_chg_pct",
+        "tnx_yield", "tyx_yield",
+        "vix", "vix_change", "vix_chg_pct",
+        "regime", "signal",
+    ]
+    return pd.DataFrame(columns=cols)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # REGIME CLASSIFICATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def classify_regime(net_gex: float, spot: float, gamma_flip: float | None,
                     flip_zone_pct: float = REGIME_FLIP_ZONE_PCT) -> str:
-    """
-    Classify the gamma regime for a single snapshot.
-
-    Regimes:
-      STRONG_POS  — net GEX strongly positive, spot above flip
-      WEAK_POS    — net GEX positive but near flip or flip unavailable
-      FLIP_ZONE   — spot within flip_zone_pct of the gamma flip level
-      WEAK_NEG    — net GEX negative but not deeply so
-      STRONG_NEG  — net GEX strongly negative
-
-    These labels are the primary filters for backtesting:
-      "only take this setup in STRONG_NEG regime"
-    """
     if gamma_flip is not None and spot > 0:
         pct_from_flip = abs(spot - gamma_flip) / spot
         if pct_from_flip <= flip_zone_pct:
             return "FLIP_ZONE"
-
     if net_gex >= REGIME_STRONG_POS_THRESHOLD:
         return "STRONG_POS"
     elif net_gex >= REGIME_WEAK_POS_THRESHOLD:
@@ -137,10 +115,6 @@ def classify_regime(net_gex: float, spot: float, gamma_flip: float | None,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_available_symbols() -> list[str]:
-    """
-    Return list of symbols that have data in the summary table.
-    Returns empty list if database unavailable.
-    """
     conn = get_connection()
     if conn is None:
         return []
@@ -157,10 +131,6 @@ def get_available_symbols() -> list[str]:
 
 
 def get_date_range(symbol: str) -> tuple[str | None, str | None]:
-    """
-    Return (earliest_date, latest_date) for a symbol as ISO date strings.
-    Returns (None, None) if no data available.
-    """
     conn = get_connection()
     if conn is None:
         return None, None
@@ -168,8 +138,7 @@ def get_date_range(symbol: str) -> tuple[str | None, str | None]:
         cur = conn.execute(
             """
             SELECT MIN(DATE(timestamp)), MAX(DATE(timestamp))
-            FROM summary
-            WHERE symbol = ?
+            FROM summary WHERE symbol = ?
             """,
             (symbol,)
         )
@@ -185,11 +154,6 @@ def get_date_range(symbol: str) -> tuple[str | None, str | None]:
 def get_pull_timestamps(symbol: str,
                         start_date: str | datetime.date,
                         end_date:   str | datetime.date) -> list[str]:
-    """
-    Return all UTC timestamps where data exists for a symbol in a date range.
-    Useful for backtesting to know exactly what intervals are available.
-    Returns empty list if no data.
-    """
     conn = get_connection()
     if conn is None:
         return []
@@ -211,18 +175,10 @@ def get_pull_timestamps(symbol: str,
         conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DASHBOARD QUERIES  (fast, single-row lookups)
+# DASHBOARD QUERIES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_latest_summary(symbol: str) -> dict | None:
-    """
-    Return the most recent summary row for a symbol as a dict.
-    Includes all key levels: gamma_flip, call_wall, put_wall, max_pain,
-    net_GEX, net_VannEX, net_CharmEX, iv_atm, per-bucket GEX.
-    Returns None if no data available.
-
-    Used by the dashboard to overlay key levels without re-computing them.
-    """
     conn = get_connection()
     if conn is None:
         return None
@@ -254,15 +210,6 @@ def get_latest_summary(symbol: str) -> dict | None:
 
 
 def get_max_pain(symbol: str, offset: int = 0) -> float | None:
-    """
-    Return the max pain strike from the summary table.
-    offset=0  → most recent pull
-    offset=1  → second most recent (previous pull cycle)
-    Returns None if unavailable.
-
-    The dashboard uses offset=1 so the displayed max pain is from the
-    last completed collector cycle rather than a potentially mid-cycle value.
-    """
     conn = get_connection()
     if conn is None:
         return None
@@ -286,25 +233,235 @@ def get_max_pain(symbol: str, offset: int = 0) -> float | None:
         conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BACKTESTING QUERIES  (range queries returning DataFrames)
+# MACRO QUERIES  (new in v2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_latest_macro() -> dict | None:
+    """
+    Return the most recent macro_snapshot row as a dict.
+    Includes TLT, USO, VIX, TNX, TYX, regime, signal.
+    Returns None if no macro data available yet.
+
+    Used by the MACRO tab to populate the regime badge and data table.
+    """
+    conn = get_connection()
+    if conn is None:
+        return None
+    try:
+        cur = conn.execute(
+            """
+            SELECT * FROM macro_snapshot
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        warnings.warn(f"db.py get_latest_macro: {e}", stacklevel=2)
+        return None
+    finally:
+        conn.close()
+
+
+def get_macro_history(start_date: str | datetime.date,
+                      end_date:   str | datetime.date) -> pd.DataFrame:
+    """
+    Return all macro_snapshot rows over a date range.
+    One row per collector pull cycle (~10 min intervals during market hours).
+    Timestamp column parsed as UTC datetime and set as index.
+
+    Used by the backtest engine to filter by macro regime.
+    """
+    conn = get_connection()
+    if conn is None:
+        return _empty_macro()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT * FROM macro_snapshot
+            WHERE DATE(timestamp) BETWEEN DATE(?) AND DATE(?)
+            ORDER BY timestamp
+            """,
+            conn,
+            params=(str(start_date), str(end_date)),
+        )
+        if df.empty:
+            return _empty_macro()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df = df.set_index("timestamp").sort_index()
+        return df
+    except Exception as e:
+        warnings.warn(f"db.py get_macro_history: {e}", stacklevel=2)
+        return _empty_macro()
+    finally:
+        conn.close()
+
+
+def get_combined_signal() -> dict | None:
+    """
+    Return the latest macro regime + GEX regime + combined signal.
+    Merges most recent macro_snapshot with most recent summary row.
+
+    Returns dict with keys:
+      macro_regime, gex_regime, signal,
+      tlt_price, tyx_yield, uso_price, vix,
+      reason  (plain English explanation string)
+
+    Returns None if either table has no data.
+    Used by the MACRO tab regime badge.
+    """
+    macro   = get_latest_macro()
+    summary = get_latest_summary("SPY")
+    if not macro or not summary:
+        return None
+
+    macro_regime = macro.get("regime", "UNKNOWN")
+    gex_regime   = summary.get("regime", "UNKNOWN")
+    signal       = macro.get("signal", "NEUTRAL")
+
+    tyx  = macro.get("tyx_yield")
+    tlt  = macro.get("tlt_price")
+    uso  = macro.get("uso_price")
+
+    # Build plain English reason string
+    parts = []
+    if tyx:
+        if tyx >= 5.0:
+            parts.append(f"TYX {tyx:.2f}% — danger zone breach")
+        elif tyx >= 4.75:
+            parts.append(f"TYX {tyx:.2f}% approaching danger zone")
+        else:
+            parts.append(f"TYX {tyx:.2f}%")
+    if uso:
+        if uso >= 110:
+            parts.append(f"Oil significantly elevated (USO ${uso:.2f})")
+        elif uso >= 100:
+            parts.append(f"Oil elevated (USO ${uso:.2f})")
+    if tlt:
+        if tlt <= 83.30 * 1.005:
+            parts.append(f"TLT ${tlt:.2f} near 52-week low")
+        elif tlt <= 84.76:
+            parts.append(f"TLT ${tlt:.2f} below key level")
+    reason = " | ".join(parts) if parts else "All macro indicators within normal range"
+
+    return {
+        "macro_regime": macro_regime,
+        "gex_regime":   gex_regime,
+        "signal":       signal,
+        "tlt_price":    tlt,
+        "tyx_yield":    tyx,
+        "uso_price":    uso,
+        "vix":          macro.get("vix"),
+        "tnx_yield":    macro.get("tnx_yield"),
+        "tlt_change":   macro.get("tlt_change"),
+        "tlt_chg_pct":  macro.get("tlt_chg_pct"),
+        "uso_change":   macro.get("uso_change"),
+        "uso_chg_pct":  macro.get("uso_chg_pct"),
+        "vix_change":   macro.get("vix_change"),
+        "reason":       reason,
+        "timestamp":    macro.get("timestamp"),
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# YIELD CURVE QUERIES  (new in v2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_yield_curve(date: str | datetime.date | None = None) -> dict | None:
+    """
+    Return yield curve row for a specific date, or most recent if None.
+    Returns dict with maturity keys: m3, m6, y1, y2, y5, y7, y10, y20, y30
+    plus spread_10_2, spread_10_3m, and date.
+    Returns None if no data available.
+
+    Used by the MACRO tab to plot today's curve.
+    """
+    conn = get_connection()
+    if conn is None:
+        return None
+    try:
+        if date is None:
+            cur = conn.execute(
+                "SELECT * FROM yield_curve ORDER BY date DESC LIMIT 1"
+            )
+        else:
+            cur = conn.execute(
+                "SELECT * FROM yield_curve WHERE date = ? LIMIT 1",
+                (str(date),)
+            )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        warnings.warn(f"db.py get_yield_curve: {e}", stacklevel=2)
+        return None
+    finally:
+        conn.close()
+
+
+def get_yield_curve_two_days() -> tuple[dict | None, dict | None]:
+    """
+    Return (today, yesterday) yield curve dicts for the MACRO tab.
+    Today = most recent row. Yesterday = second most recent row.
+    Either can be None if insufficient data.
+
+    Used to draw today's curve (solid) vs yesterday's (ghost line).
+    """
+    conn = get_connection()
+    if conn is None:
+        return None, None
+    try:
+        cur = conn.execute(
+            "SELECT * FROM yield_curve ORDER BY date DESC LIMIT 2"
+        )
+        rows = cur.fetchall()
+        today     = dict(rows[0]) if len(rows) >= 1 else None
+        yesterday = dict(rows[1]) if len(rows) >= 2 else None
+        return today, yesterday
+    except Exception as e:
+        warnings.warn(f"db.py get_yield_curve_two_days: {e}", stacklevel=2)
+        return None, None
+    finally:
+        conn.close()
+
+
+def get_yield_curve_history(start_date: str | datetime.date,
+                            end_date:   str | datetime.date) -> pd.DataFrame:
+    """
+    Return all yield curve rows over a date range as a DataFrame.
+    Date column set as index. Used for historical curve comparison.
+    Returns empty DataFrame if no data.
+    """
+    conn = get_connection()
+    if conn is None:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT * FROM yield_curve
+            WHERE date BETWEEN ? AND ?
+            ORDER BY date
+            """,
+            conn,
+            params=(str(start_date), str(end_date)),
+        )
+        if df.empty:
+            return pd.DataFrame()
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        df = df.set_index("date")
+        return df
+    except Exception as e:
+        warnings.warn(f"db.py get_yield_curve_history: {e}", stacklevel=2)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BACKTESTING QUERIES  (unchanged from v1)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_summary_history(symbol: str,
                         start_date: str | datetime.date,
                         end_date:   str | datetime.date) -> pd.DataFrame:
-    """
-    Return all summary rows for a symbol in a date range.
-    One row per collector pull cycle (~15 min intervals during market hours).
-
-    Columns include all summary fields plus a derived 'regime' column.
-    The 'timestamp' column is parsed as UTC datetime and set as the index.
-
-    This is the primary input for backtesting:
-      df = get_summary_history("SPY", "2025-01-01", "2025-06-01")
-      opens = df.between_time("09:30", "09:45")  # opening snapshots
-
-    Returns empty DataFrame if no data available.
-    """
     conn = get_connection()
     if conn is None:
         return _empty_summary()
@@ -321,11 +478,8 @@ def get_summary_history(symbol: str,
         )
         if df.empty:
             return _empty_summary()
-
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df = df.set_index("timestamp").sort_index()
-
-        # Derive regime for every row
         df["regime"] = df.apply(
             lambda r: classify_regime(
                 r.get("net_GEX", 0),
@@ -344,29 +498,17 @@ def get_summary_history(symbol: str,
 
 def get_opening_snapshot(symbol: str,
                          date: str | datetime.date) -> dict | None:
-    """
-    Return the first summary row after 9:30am ET for a given date.
-    This is the "opening gamma level" — the primary signal for
-    intraday gamma strategy backtesting.
-
-    Returns a dict with all summary fields + regime label.
-    Returns None if no data for that date.
-    """
     conn = get_connection()
     if conn is None:
         return None
     try:
-        # 9:30am ET = 13:30 UTC (EST) or 14:30 UTC (EDT)
-        # Query both offsets and take the earliest result after open
         date_str = str(date)
         cur = conn.execute(
             """
             SELECT * FROM summary
             WHERE symbol = ?
               AND DATE(timestamp) = DATE(?)
-              AND (
-                  TIME(timestamp) >= '13:30:00'
-              )
+              AND TIME(timestamp) >= '13:30:00'
             ORDER BY timestamp ASC
             LIMIT 1
             """,
@@ -374,7 +516,6 @@ def get_opening_snapshot(symbol: str,
         )
         row = cur.fetchone()
         if row is None:
-            # Try EDT offset (14:30 UTC) as fallback
             cur = conn.execute(
                 """
                 SELECT * FROM summary
@@ -407,15 +548,6 @@ def get_strike_history(symbol: str,
                        start_date: str | datetime.date,
                        end_date:   str | datetime.date,
                        dte_bucket: str | None = None) -> pd.DataFrame:
-    """
-    Return per-strike Greeks history for a specific strike over a date range.
-    Optionally filter by DTE bucket (e.g. '0DTE', '1-7DTE').
-
-    Useful for analyzing how positioning at a specific level evolved over time.
-    E.g. "how did GEX at the 580 strike change in the week before OPEX?"
-
-    Returns empty DataFrame if no data.
-    """
     conn = get_connection()
     if conn is None:
         return _empty_strikes()
@@ -425,7 +557,6 @@ def get_strike_history(symbol: str,
         if dte_bucket:
             bucket_clause = "AND dte_bucket = ?"
             params.append(dte_bucket)
-
         df = pd.read_sql_query(
             f"""
             SELECT * FROM strike_data
@@ -452,18 +583,6 @@ def get_strike_history(symbol: str,
 
 def get_gex_surface(symbol: str,
                     timestamp: str | datetime.datetime) -> pd.DataFrame:
-    """
-    Return the full GEX profile across all strikes at a single timestamp.
-    Reconstructs the exact state of the GEX chart at any historical moment.
-
-    Useful for the backtest tab: "show me the GEX surface at 9:30am on April 3rd"
-
-    timestamp should be an ISO UTC string or datetime, e.g.:
-      "2025-04-03T13:30:00Z"
-
-    Finds the closest available timestamp within 10 minutes of the requested time.
-    Returns empty DataFrame if nothing found within that window.
-    """
     conn = get_connection()
     if conn is None:
         return _empty_strikes()
@@ -471,8 +590,6 @@ def get_gex_surface(symbol: str,
         ts_str = (timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
                   if isinstance(timestamp, datetime.datetime)
                   else str(timestamp))
-
-        # Find closest timestamp within ±10 minutes
         cur = conn.execute(
             """
             SELECT timestamp FROM strike_data
@@ -486,7 +603,6 @@ def get_gex_surface(symbol: str,
         row = cur.fetchone()
         if row is None:
             return _empty_strikes()
-
         closest_ts = row[0]
         df = pd.read_sql_query(
             """
@@ -512,22 +628,9 @@ def get_regime_history(symbol: str,
                        start_date: str | datetime.date,
                        end_date:   str | datetime.date,
                        flip_zone_pct: float = REGIME_FLIP_ZONE_PCT) -> pd.DataFrame:
-    """
-    Return summary history with regime classification for every row.
-    Thin wrapper around get_summary_history that makes the regime column
-    the primary focus — useful for filtering backtests by regime.
-
-    Returns DataFrame with columns: spot, net_GEX, gamma_flip, regime
-    plus all other summary columns. Timestamp is the index.
-
-    Example usage:
-      regimes = get_regime_history("SPY", "2025-01-01", "2025-06-01")
-      neg_days = regimes[regimes["regime"].isin(["WEAK_NEG", "STRONG_NEG"])]
-    """
     df = get_summary_history(symbol, start_date, end_date)
     if df.empty:
         return df
-    # Recompute regime with custom flip_zone_pct if provided
     if flip_zone_pct != REGIME_FLIP_ZONE_PCT:
         df["regime"] = df.apply(
             lambda r: classify_regime(
@@ -544,23 +647,6 @@ def get_regime_history(symbol: str,
 def get_session_summary(symbol: str,
                         start_date: str | datetime.date,
                         end_date:   str | datetime.date) -> pd.DataFrame:
-    """
-    Return one row per trading day with opening and closing snapshot values.
-    Pre-computes the most common backtesting joins so strategies don't
-    need to reconstruct them from raw 15-minute data every run.
-
-    Columns:
-      date, symbol,
-      open_spot, open_net_gex, open_gamma_flip, open_max_pain, open_regime,
-      open_call_wall, open_put_wall,
-      close_spot, close_net_gex, close_gamma_flip,
-      intraday_high_spot, intraday_low_spot,
-      closed_above_flip  (bool — did price close above the opening gamma flip?)
-      flip_tested        (bool — did price touch within 0.1% of gamma flip?)
-
-    Returns empty DataFrame if insufficient data.
-    This is the primary input for daily gamma strategy backtesting.
-    """
     conn = get_connection()
     if conn is None:
         return pd.DataFrame()
@@ -587,20 +673,19 @@ def get_session_summary(symbol: str,
             first = group.iloc[0]
             last  = group.iloc[-1]
 
-            open_flip = first.get("gamma_flip")
-            open_spot = first.get("spot", 0)
+            open_flip  = first.get("gamma_flip")
+            open_spot  = first.get("spot", 0)
             close_spot = last.get("spot", 0)
 
             flip_tested = False
             if open_flip and open_flip > 0:
-                spots = group["spot"].values
+                spots       = group["spot"].values
                 flip_tested = any(abs(s - open_flip) / open_flip <= 0.001
                                   for s in spots)
 
             rows.append({
                 "date":               date,
                 "symbol":             symbol,
-                # Opening values
                 "open_spot":          open_spot,
                 "open_net_gex":       first.get("net_GEX"),
                 "open_gamma_flip":    open_flip,
@@ -610,24 +695,19 @@ def get_session_summary(symbol: str,
                 "open_iv_atm":        first.get("iv_atm"),
                 "open_regime":        classify_regime(
                                           first.get("net_GEX", 0),
-                                          open_spot,
-                                          open_flip,
+                                          open_spot, open_flip,
                                       ),
-                # Closing values
                 "close_spot":         close_spot,
                 "close_net_gex":      last.get("net_GEX"),
                 "close_gamma_flip":   last.get("gamma_flip"),
-                # Intraday range
                 "intraday_high_spot": group["spot"].max(),
                 "intraday_low_spot":  group["spot"].min(),
-                # Derived flags
                 "closed_above_flip":  (open_flip is not None
                                        and close_spot > open_flip),
                 "flip_tested":        flip_tested,
             })
 
-        result = pd.DataFrame(rows).set_index("date")
-        return result
+        return pd.DataFrame(rows).set_index("date")
     except Exception as e:
         warnings.warn(f"db.py get_session_summary: {e}", stacklevel=2)
         return pd.DataFrame()
@@ -640,8 +720,8 @@ def get_session_summary(symbol: str,
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("db.py — Greeks Database Access Layer")
-    print(f"Database path: {DB_PATH}")
+    print("db.py — Greeks Database Access Layer v2")
+    print(f"Database: {DB_PATH}")
     print()
 
     syms = get_available_symbols()
@@ -653,26 +733,40 @@ if __name__ == "__main__":
             start, end = get_date_range(sym)
             print(f"  {sym}: {start} → {end}")
 
-        sym = syms[0]
-        print(f"\nLatest summary for {sym}:")
-        s = get_latest_summary(sym)
-        if s:
-            print(f"  Spot:       ${s.get('spot', 0):.2f}")
-            print(f"  Net GEX:    ${s.get('net_GEX', 0)/1e9:.3f}B")
-            print(f"  Gamma Flip: ${s.get('gamma_flip', 0):.2f}")
-            print(f"  Max Pain:   ${s.get('max_pain', 0):.2f}")
-            print(f"  Regime:     {s.get('regime')}")
+    print("\nLatest macro snapshot:")
+    macro = get_latest_macro()
+    if macro:
+        print(f"  TLT:    ${macro.get('tlt_price', 'N/A')}")
+        print(f"  TYX:    {macro.get('tyx_yield', 'N/A')}%")
+        print(f"  USO:    ${macro.get('uso_price', 'N/A')}")
+        print(f"  VIX:    {macro.get('vix', 'N/A')}")
+        print(f"  Regime: {macro.get('regime', 'N/A')}")
+        print(f"  Signal: {macro.get('signal', 'N/A')}")
+    else:
+        print("  No macro data yet.")
 
-        print(f"\nMax pain (offset=1) for {sym}: {get_max_pain(sym, offset=1)}")
+    print("\nCombined signal:")
+    sig = get_combined_signal()
+    if sig:
+        print(f"  Macro:  {sig['macro_regime']}")
+        print(f"  GEX:    {sig['gex_regime']}")
+        print(f"  Signal: {sig['signal']}")
+        print(f"  Reason: {sig['reason']}")
+    else:
+        print("  No signal data yet.")
 
-        start, end = get_date_range(sym)
-        if start and end:
-            print(f"\nSummary history ({sym}, {start} → {end}):")
-            hist = get_summary_history(sym, start, end)
-            print(f"  {len(hist)} rows, {hist['regime'].value_counts().to_dict()}")
-
-            print(f"\nSession summary ({sym}):")
-            sess = get_session_summary(sym, start, end)
-            if not sess.empty:
-                print(sess[["open_spot", "open_regime",
-                             "closed_above_flip", "flip_tested"]].to_string())
+    print("\nYield curve (today + yesterday):")
+    today_curve, yesterday_curve = get_yield_curve_two_days()
+    if today_curve:
+        print(f"  Today ({today_curve['date']}): "
+              f"2Y={today_curve.get('y2')}% "
+              f"10Y={today_curve.get('y10')}% "
+              f"30Y={today_curve.get('y30')}%")
+        print(f"  10Y-2Y spread: {today_curve.get('spread_10_2')}%")
+    else:
+        print("  No yield curve data yet.")
+    if yesterday_curve:
+        print(f"  Yesterday ({yesterday_curve['date']}): "
+              f"2Y={yesterday_curve.get('y2')}% "
+              f"10Y={yesterday_curve.get('y10')}% "
+              f"30Y={yesterday_curve.get('y30')}%")

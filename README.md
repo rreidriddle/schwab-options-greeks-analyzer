@@ -1,7 +1,7 @@
 # Black-Scholes Greeks Dashboard
 
 A Python tool that uses Schwab API data to fetch live options chain data
-and compute second-order greeks for SPY, QQQ, and DIA. It visualizes current
+and compute second-order greeks for S&P 500 ticker SPY. It visualizes current
 GammaEX, VannaEX, and CharmEX for market maker hedging flows.
 
 ![Options Greeks Dashboard](dashboard.png)
@@ -11,8 +11,7 @@ GammaEX, VannaEX, and CharmEX for market maker hedging flows.
 ## What It Does
 
 - Auth.py walks you through Charles Schwab's authentication process
-- Fetches full options chain across near spot strikes and expirations for SPY, QQQ, DIA
-- Computes first and second-order Greeks using Black-Scholes:
+- Fetches full options chain across near spot strikes and expirations for SPY
     - Delta, Vega (first-order)
     - Gamma, Vanna, Charm (second-order)
 - Measures both call and put greeks with a net toggle option
@@ -53,14 +52,68 @@ Vanna and Charm exposure curves. Key levels such as spot price, gamma flip, and 
 are overlaid on the GEX chart. Use the control bar to filter by DTE, expiration date,
 and strike range, or toggle Vanna and Charm between net and call/put split views.
 
-### Vol Smile
-Plots implied volatility across strikes for both calls and puts, with spot price marked.
-The shape of this curve reveals where the market is pricing risk. A classic volatility
-skew is asymmetric; OTM puts carry higher IV than equidistant OTM calls, driven by
-demand for downside protection. A volatility smile is symmetric, with IV being lowest ATM,
-indicating the market is pricing the possibility of a large move in
-either direction. This connects directly to the VannEX chart. A steeper skew means higher
-vanna sensitivity and stronger mechanical hedging flows when IV moves.
+### 
+
+
+### Macro
+
+**Regime Badge**
+At the top of the panel sits a color-coded macro regime badge. This badge synthesizes
+bond market health, energy prices, and options positioning into a single actionable
+label updated every ten minutes by the collector. Four regime states are possible:
+
+| Regime | Color | What It Means |
+|--------|-------|---------------|
+| GREEN | 🟢 | Bond market stable, oil contained, macro tailwind for equities |
+| YELLOW | 🟡 | Early warning signs present — reduce conviction, wait for confirmation |
+| ORANGE | 🟠 | Meaningful macro headwind — yields rising, oil elevated, or bonds deteriorating |
+| RED | 🔴 | Danger zone breach — 30-year yield above 5%, oil significantly elevated, or bonds near 52-week lows |
+
+Signals shown are a combination of macro regime and GEX/VEX/CEX regime. We can combine
+the two to determine whether they are working together or inversely. This also shows us
+if there is an edge at all. If not, reduce size or wait for confirmation. 
+
+**Yield Curve**
+Below the regime badge, the U.S. Treasury yield curve is plotted.
+Today's curve is shown as a solid line.Yesterday's curve is shown as a faint
+ghost line behind it, making the daily shift immediately visible at a glance.
+
+A normal curve slopes upward: short-term rates lower than long-term rates, meaning 
+markets expect stable growth and moderate inflation. An inverted curve, where short-term
+rates exceed long-term rates, has historically preceded recessions. A flat curve
+signals uncertainty about the economic path ahead.
+
+Two key spreads are always annotated on the chart:
+- **10Y-2Y Spread** — the most watched recession indicator. When this goes negative (inverts) it turns red.
+- **10Y-3M Spread** — a complementary recession signal that often leads the 10Y-2Y.
+
+A red dashed horizontal line marks the **5% threshold** on the 30-year yield.
+This level is significant because above it, U.S. Treasury bonds offer a
+near risk-free return competitive enough to draw capital away from equities,
+increasing pressure on stock valuations.
+
+**Data Table**
+A compact table sits directly below the yield curve showing:
+- Each maturity's current yield and its change from the prior day (green = fell, red = rose)
+- Both key spreads with inversion warnings
+- Live readings for TLT (long-term bond ETF), USO (oil proxy), TNX (10-year yield), and TYX (30-year yield)
+
+**IV Skew**
+At the bottom of the panel, the implied volatility smile plots call IV and put IV
+across strikes for the selected expiration. The shape of this curve reveals where
+the market is pricing risk. A classic volatility skew is asymmetric: OTM puts
+carry higher IV than equidistant OTM calls driven by demand for downside
+protection. A volatility smile is more symmetric, with IV lowest at-the-money,
+indicating the market is pricing the possibility of a large move in either direction.
+This connects directly to the VannEX chart: a steeper skew means higher vanna
+sensitivity and stronger mechanical hedging flows when IV moves.
+
+> **Note:** The Macro tab requires the collector to be running to populate the
+> regime badge, yield curve, and data table. The Vol Smile section renders from
+> live chain data and is always available. See
+> [schwab-greeks-historical-data](https://github.com/rreidriddle/schwab-greeks-historical-data)
+> for the data collection pipeline.
+
 
 ### Backtest
 Using the calendar widget, you can select any historical date to visualize that day's
@@ -119,7 +172,7 @@ Run `auth.py` first to complete Schwab's OAuth flow and cache your access token,
 python gex-dashboard.py
 ```
 
-Live mode fetches real-time options chains for SPY, QQQ, and DIA, auto-refreshing
+Live mode fetches real-time options chains for SPY auto-refreshing
 every 5 minutes. A status indicator in the control bar shows refresh state.
 
 ---
@@ -168,20 +221,6 @@ python gex-dashboard.py
   Net GEX     $+0.531B  POSITIVE
   Net VannEX  $+253270K
   Net CharmEX -2.4584M
-
-══════════════════════════════════════════════════════════
-  QQQ  |  Spot $611.50  |  OI 2,649,282
-══════════════════════════════════════════════════════════
-  Net GEX     $+0.429B  POSITIVE
-  Net VannEX  $+115152K
-  Net CharmEX -1.3930M
-
-══════════════════════════════════════════════════════════
-  DIA  |  Spot $479.40  |  OI 85,254
-══════════════════════════════════════════════════════════
-  Net GEX     $+0.022B  POSITIVE
-  Net VannEX  $+3950K
-  Net CharmEX -0.0327M
 
 ```
 
