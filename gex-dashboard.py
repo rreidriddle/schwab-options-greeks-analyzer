@@ -709,12 +709,6 @@ def draw_yield_curve(ax, today_curve: dict | None,
 def draw_yield_data_table(ax, today_curve: dict | None,
                           yesterday_curve: dict | None,
                           macro: dict | None):
-    """
-    Draw the data table below the yield curve showing:
-    - Per-maturity yield + Δ vs yesterday
-    - Key spreads
-    - TLT, Oil (USO), TNX, TYX live values
-    """
     ax.set_facecolor(C["panel"])
     ax.axis("off")
 
@@ -724,114 +718,122 @@ def draw_yield_data_table(ax, today_curve: dict | None,
                 color=C["subtext"], fontsize=10)
         return
 
-    # Build rows: maturity | yield | Δ
-    col_labels = []
-    col_yields = []
-    col_deltas = []
+    def _chg_str(chg, pct=None):
+        """Format a change value into arrow + amount + optional pct string."""
+        if chg is None:
+            return "—", C["subtext"]
+        arrow = "▲" if chg >= 0 else "▼"
+        color = C["ind_green"] if chg >= 0 else C["ind_red"]
+        if pct is not None:
+            return f"{arrow}{abs(chg):.2f}  ({abs(pct):.2f}%)", color
+        return f"{arrow}{abs(chg):.3f}%", color
 
-    for label, key in MATURITIES:
-        today_y = today_curve.get(key) if today_curve else None
-        yest_y  = yesterday_curve.get(key) if yesterday_curve else None
-        if today_y is None:
-            continue
-        delta = round(today_y - yest_y, 3) if yest_y else None
-        col_labels.append(label)
-        col_yields.append(f"{today_y:.2f}%")
-        col_deltas.append(
-            (f"{delta:+.3f}%" if delta is not None else "—",
-             C["ind_red"] if (delta and delta > 0) else
-             C["ind_green"] if (delta and delta < 0) else C["subtext"])
-        )
+    # ── Block 1: TLT / USO ───────────────────────────────────────────────────
+    # x=0.01  Label | value | change
 
-    # Render as text columns across the axes
-    n    = len(col_labels)
-    if n == 0:
-        return
-
-    x_step = 1.0 / (n + 1)
-    y_mat  = 0.82
-    y_yld  = 0.52
-    y_dlt  = 0.22
-
-    # Headers
-    ax.text(0.0, 0.97, "Maturity:", color=C["subtext"],
-            fontsize=7.5, transform=ax.transAxes,
-            fontfamily="monospace", fontweight="bold")
-    ax.text(0.0, 0.67, "Yield:",    color=C["subtext"],
-            fontsize=7.5, transform=ax.transAxes,
-            fontfamily="monospace", fontweight="bold")
-    ax.text(0.0, 0.37, "Δ vs yest:", color=C["subtext"],
-            fontsize=7.5, transform=ax.transAxes,
-            fontfamily="monospace", fontweight="bold")
-
-    for i, (lbl, yld, (dlt, dlt_c)) in enumerate(
-            zip(col_labels, col_yields, col_deltas)):
-        x = 0.12 + i * x_step
-        ax.text(x, y_mat, lbl, color=C["text"],   fontsize=7.5,
-                transform=ax.transAxes, ha="center",
-                fontfamily="monospace")
-        ax.text(x, y_yld, yld, color=C["text"],   fontsize=7.5,
-                transform=ax.transAxes, ha="center",
-                fontfamily="monospace")
-        ax.text(x, y_dlt, dlt, color=dlt_c,       fontsize=7.5,
-                transform=ax.transAxes, ha="center",
-                fontfamily="monospace")
-
-    # Separator line
-    ax.axhline(0.05, color=C["border"], linewidth=0.5,
-               transform=ax.transAxes)
-
-    # Bottom row: spreads + live macro values
-    spread_10_2  = today_curve.get("spread_10_2")  if today_curve else None
-    spread_10_3m = today_curve.get("spread_10_3m") if today_curve else None
-
-    bottom_items = []
-    if spread_10_2 is not None:
-        inv = spread_10_2 < 0
-        bottom_items.append((
-            f"10Y-2Y: {spread_10_2:+.2f}%"
-            + (" ⚠ INVERTED" if inv else ""),
-            C["ind_red"] if inv else C["subtext"]
-        ))
-    if spread_10_3m is not None:
-        inv = spread_10_3m < 0
-        bottom_items.append((
-            f"10Y-3M: {spread_10_3m:+.2f}%"
-            + (" ⚠ INVERTED" if inv else ""),
-            C["ind_red"] if inv else C["subtext"]
-        ))
     if macro:
-        tlt = macro.get("tlt_price")
+        tlt     = macro.get("tlt_price")
+        tlt_chg = macro.get("tlt_change")
         tlt_pct = macro.get("tlt_chg_pct")
-        uso = macro.get("uso_price")
+        uso     = macro.get("uso_price")
+        uso_chg = macro.get("uso_change")
         uso_pct = macro.get("uso_chg_pct")
+
+        # TLT row
+        if tlt is not None:
+            chg_s, chg_c = _chg_str(tlt_chg, tlt_pct)
+            ax.text(0.01, 0.72, "TLT", color=C["subtext"], fontsize=7.5,
+                    transform=ax.transAxes, fontfamily="monospace")
+            ax.text(0.08, 0.72, f"${tlt:.2f}", color=C["text"], fontsize=9,
+                    transform=ax.transAxes, fontfamily="monospace",
+                    fontweight="bold")
+            ax.text(0.18, 0.72, chg_s, color=chg_c, fontsize=7.5,
+                    transform=ax.transAxes, fontfamily="monospace")
+
+        # USO row
+        if uso is not None:
+            chg_s, chg_c = _chg_str(uso_chg, uso_pct)
+            ax.text(0.01, 0.38, "USO", color=C["subtext"], fontsize=7.5,
+                    transform=ax.transAxes, fontfamily="monospace")
+            ax.text(0.08, 0.38, f"${uso:.2f}", color=C["text"], fontsize=9,
+                    transform=ax.transAxes, fontfamily="monospace",
+                    fontweight="bold")
+            ax.text(0.18, 0.38, chg_s, color=chg_c, fontsize=7.5,
+                    transform=ax.transAxes, fontfamily="monospace")
+
+    # Vertical divider after block 1
+    ax.plot([0.36, 0.36], [0.1, 0.95], color=C["border"], linewidth=0.5,
+            transform=ax.transAxes, clip_on=False)
+
+    # ── Block 2: Treasury yields (IRX=13wk, FVX=5Y, TNX=10Y, TYX=30Y) ───────
+    # x=0.39  Label | yield value
+    # Two columns: IRX+TNX on left, FVX+TYX on right within the block
+
+    if macro:
+        irx = macro.get("irx_yield")
+        fvx = macro.get("fvx_yield")
         tnx = macro.get("tnx_yield")
         tyx = macro.get("tyx_yield")
-        if tlt:
-            arrow = "▲" if (tlt_pct or 0) >= 0 else "▼"
-            bottom_items.append((
-                f"TLT ${tlt:.2f} {arrow}{abs(tlt_pct or 0):.1f}%",
-                C["ind_green"] if (tlt_pct or 0) >= 0 else C["ind_red"]
-            ))
-        if uso:
-            arrow = "▲" if (uso_pct or 0) >= 0 else "▼"
-            bottom_items.append((
-                f"USO ${uso:.2f} {arrow}{abs(uso_pct or 0):.1f}%",
-                C["ind_red"] if (uso_pct or 0) >= 0 else C["ind_green"]
-            ))
-        if tnx:
-            bottom_items.append((f"TNX {tnx:.2f}%", C["subtext"]))
-        if tyx:
-            color = C["ind_red"] if tyx >= 5.0 else \
-                    C["ind_yellow"] if tyx >= 4.75 else C["subtext"]
-            bottom_items.append((f"TYX {tyx:.2f}%", color))
 
-    x_step_b = 1.0 / max(len(bottom_items), 1)
-    for i, (text, color) in enumerate(bottom_items):
-        ax.text(0.01 + i * x_step_b, 0.0, text,
-                color=color, fontsize=7.5,
-                transform=ax.transAxes,
-                fontfamily="monospace")
+        yields = [
+            ("13-Wk", irx, 0.39, 0.72),
+            ("5-Yr",  fvx, 0.39, 0.38),
+            ("10-Yr", tnx, 0.57, 0.72),
+            ("30-Yr", tyx, 0.57, 0.38),
+        ]
+
+        for label, val, x, y in yields:
+            ax.text(x, y, label, color=C["subtext"], fontsize=7.5,
+                    transform=ax.transAxes, fontfamily="monospace")
+            if val is not None:
+                # Color 30-Yr by danger threshold; others neutral
+                if label == "30-Yr":
+                    val_color = (C["ind_red"]    if val >= 5.0  else
+                                 C["ind_yellow"] if val >= 4.75 else C["text"])
+                else:
+                    val_color = C["text"]
+                ax.text(x + 0.09, y, f"{val:.3f}%", color=val_color,
+                        fontsize=9, transform=ax.transAxes,
+                        fontfamily="monospace", fontweight="bold")
+            else:
+                ax.text(x + 0.09, y, "—", color=C["subtext"], fontsize=8,
+                        transform=ax.transAxes, fontfamily="monospace")
+
+    # Vertical divider after block 2
+    ax.plot([0.72, 0.72], [0.1, 0.95], color=C["border"], linewidth=0.5,
+            transform=ax.transAxes, clip_on=False)
+
+    # ── Block 3: Spreads ──────────────────────────────────────────────────────
+    # x=0.75  Label | spread value
+
+    if today_curve:
+        spread_10_2  = today_curve.get("spread_10_2")
+        spread_10_3m = today_curve.get("spread_10_3m")
+
+        spreads = [
+            ("10Y - 2Y",  spread_10_2,  0.72),
+            ("10Y - 3M",  spread_10_3m, 0.38),
+        ]
+
+        for label, val, y in spreads:
+            ax.text(0.75, y, label, color=C["subtext"], fontsize=7.5,
+                    transform=ax.transAxes, fontfamily="monospace")
+            if val is not None:
+                inv       = val < 0
+                val_color = C["ind_red"] if inv else C["text"]
+                suffix    = "  ⚠" if inv else ""
+                ax.text(0.88, y, f"{val:+.3f}%{suffix}",
+                        color=val_color, fontsize=9,
+                        transform=ax.transAxes, fontfamily="monospace",
+                        fontweight="bold")
+            else:
+                ax.text(0.88, y, "—", color=C["subtext"], fontsize=8,
+                        transform=ax.transAxes, fontfamily="monospace")
+
+    # Horizontal separator at bottom
+    ax.plot([0, 1], [0.08, 0.08], color=C["border"], linewidth=0.5,
+            transform=ax.transAxes, clip_on=False)
+
         
 # ══════════════════════════════════════════════════════════════════════════════
 # BACKTEST PRICE CHART RENDERER
