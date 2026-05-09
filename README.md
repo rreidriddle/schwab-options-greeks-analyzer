@@ -38,7 +38,7 @@ Control bar filters: **DTE** (0DTE / 0-7 / 0-21 / 0-45), **Expiry** (specific da
 
 ### MACRO
 
-Three panels stacked vertically:
+![Macro Tab](macro.png)
 
 **Regime Badge** — synthesizes bond market and options positioning into a single label.
 
